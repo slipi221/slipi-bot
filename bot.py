@@ -127,7 +127,7 @@ def shop_reg_step(m):
         del shop_reg[m.from_user.id]
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("📝 Зарегистрироваться", callback_data="start_register"))
-        bot_shop.send_message(m.chat.id, "Отменено.\n\nЧтобы начать работу — зарегистрируйтесь:", reply_markup=kb); return
+        bot_shop.send_message(m.chat.id, "Отменено", reply_markup=kb); return
     st = shop_reg[m.from_user.id]; s = st["step"]; d = st["d"]
     if s == "phone"
         t = m.text.replace(" ","").replace("-","").replace("(","").replace(")","")
