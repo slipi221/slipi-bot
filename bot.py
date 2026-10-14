@@ -820,6 +820,19 @@ def run_bot(bot, name):
         try: bot.infinity_polling(timeout=30, long_polling_timeout=20)
         except Exception as e:
             print(f"❌ {name}: {e}"); time.sleep(5)
+            # ========== ГЛОБАЛЬНАЯ ОТМЕНА ==========
+@bot_shop.message_handler(func=lambda m: m.text=="❌ Отмена")
+def shop_cancel_global(m):
+    if m.from_user.id in shop_reg: del shop_reg[m.from_user.id]
+    if m.from_user.id in order_reg: del order_reg[m.from_user.id]
+    bot_shop.send_message(m.chat.id, "Отменено.", reply_markup=kb_shop())
+
+@bot_courier.message_handler(func=lambda m: m.text=="❌ Отмена")
+def cour_cancel_global(m):
+    if m.from_user.id in cour_reg: del cour_reg[m.from_user.id]
+    if m.from_user.id in withdraw_reg: del withdraw_reg[m.from_user.id]
+    bot_courier.send_message(m.chat.id, "Отменено.", reply_markup=kb_courier())
+
 
 if __name__ == "__main__":
     print("📦 Инициализация БД...")
