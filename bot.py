@@ -288,12 +288,26 @@ def cb_start_register(c):
     bot_shop.answer_callback_query(c.id)
 # ===== ЗАЯВКА МАГАЗИНА =====
 @bot_shop.message_handler(func=lambda m: m.text=="🆕 Создать заявку")
+@bot_shop.message_handler(func=lambda m: m.text=="🆕 Создать заявку")
 def order_start(m):
     s = db("SELECT * FROM shops WHERE tg_id=?", (m.from_user.id,), "one")
     if not s or s[8]!="active":
         bot_shop.send_message(m.chat.id, "Доступ закрыт."); return
-    order_reg[m.from_user.id] = {"step":"shop_name","d":{"shop_id":s[0]}}
-    bot_shop.send_message(m.chat.id, "📦 Шаг 1/10: Название магазина", reply_markup=kb_cancel())
+    order_reg[m.from_user.id] = {
+        "step": "address_to",
+        "d": {"shop_id": s[0], "shop_name": s[2], "address_from": s[3]}
+    }
+    bot_shop.send_message(m.chat.id,
+        "📦 Создание заявки\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"🏪 Магазин: {s[2]}\n"
+        f"📍 Откуда: {s[3]}\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        "📝 Шаг 1/7: Куда отвезти\n\n"
+        "Введите адрес получателя:\n"
+        "Улица, дом, подъезд, квартира, этаж\n\n"
+        "Пример: ул. Гагарина 10, подъезд 3, кв. 45, этаж 7",
+        reply_markup=kb_cancel())
 
 @bot_shop.message_handler(func=lambda m: m.from_user.id in order_reg)
 def order_step(m):
@@ -301,35 +315,107 @@ def order_step(m):
         del order_reg[m.from_user.id]
         bot_shop.send_message(m.chat.id, "Отменено.", reply_markup=kb_shop()); return
     st = order_reg[m.from_user.id]; s = st["step"]; d = st["d"]
-    prompts = {"address_from":"Шаг 2/10: Откуда забрать","address_to":"Шаг 3/10: Куда отвезти",
-               "client_name":"Шаг 4/10: Имя клиента","client_phone":"Шаг 5/10: Телефон клиента",
-               "client_tg":"Шаг 6/10: TG ID клиента (цифры)","delivery_time":"Шаг 7/10: Ко скольким доставить",
-               "order_price":"Шаг 8/10: Сумма заказа",
-               "delivery_price":f"Шаг 9/10: Доставка (мин {config.MIN_DELIVERY})",
-               "comment":"Шаг 10/10: Комментарий для курьера"}
-    steps = ["shop_name","address_from","address_to","client_name","client_phone","client_tg","delivery_time","order_price","delivery_price","comment"]
-    if s == "client_tg":
-        if not m.text.strip().isdigit(): bot_shop.send_message(m.chat.id, "❌ Только цифры."); return
-        d[s] = int(m.text.strip())
-    elif s in ("order_price","delivery_price"):
+
+    if s == "delivery_zone":
+        zone_key = None
+        for key, zone in config.DELIVERY_ZONES.items():
+            if zone["name"] in m.text:
+                zone_key = key
+                break
+        if not zone_key:
+            bot_shop.send_message(m.chat.id, "❌ Выберите зону из кнопок ниже.")
+            return
+        d["delivery_price"] = config.DELIVERY_ZONES[zone_key]["price"]
+        d["delivery_zone"] = config.DELIVERY_ZONES[zone_key]["name"]
+        st["step"] = "order_price"
+        bot_shop.send_message(m.chat.id,
+            f"✅ Зона: {d['delivery_zone']}\n💰 Доставка: {d['delivery_price']} ₽\n\n"
+            "📝 Шаг 6/7: Сумма заказа\n\nВведите стоимость букета в рублях. Например: 2500",
+            reply_markup=kb_cancel())
+        return
+
+    prompts = {
+        "address_to": "📝 Шаг 2/7: Имя получателя\n\nКак зовут клиента?",
+        "client_name": "📝 Шаг 3/7: Телефон получателя\n\nФормат: 8XXXXXXXXXX (11 цифр)\nПример: 89917929251",
+        "client_phone": (
+            "📝 Шаг 4/7: Telegram ID клиента\n"
+            "━━━━━━━━━━━━━━━\n\n"
+            "🔍 Как узнать ID:\n"
+            "1. Попросите клиента написать\n"
+            "   @userinfobot в Telegram\n"
+            "2. Бот пришлёт числовой ID\n"
+            "3. Пришлите сюда это число\n\n"
+            "⚠️ Если ID нет — отправьте -"
+        ),
+        "client_tg": "📝 Шаг 5/7: Время доставки\n\nНапример: Сегодня до 18:00",
+        "delivery_time": "",
+        "order_price": "📝 Шаг 7/7: Комментарий для курьера\n\nКод домофона, особенности адреса\n\nЕсли нечего — отправьте -",
+    }
+    steps = ["address_to","client_name","client_phone","client_tg","delivery_time","delivery_zone","order_price","comment"]
+
+    if s == "client_phone":
+        t = m.text.replace(" ","").replace("-","").replace("(","").replace(")","")
+        if t.startswith("+7"): t = "8" + t[2:]
+        elif t.startswith("7") and len(t) == 11: t = "8" + t[1:]
+        if not t.isdigit() or len(t) != 11 or not t.startswith("8"):
+            bot_shop.send_message(m.chat.id, "❌ Неверный номер. Формат: 8XXXXXXXXXX (11 цифр)")
+            return
+        d[s] = t
+    elif s == "order_price":
         try: v = float(m.text.replace(",","."))
-        except: bot_shop.send_message(m.chat.id, "❌ Введите число."); return
-        if s == "delivery_price" and v < config.MIN_DELIVERY:
-            bot_shop.send_message(m.chat.id, f"❌ Минимум {config.MIN_DELIVERY}"); return
+        except:
+            bot_shop.send_message(m.chat.id, "❌ Введите число. Например: 2500"); return
+        if v <= 0:
+            bot_shop.send_message(m.chat.id, "❌ Сумма должна быть больше 0"); return
         d[s] = v
-    else: d[s] = m.text
+    else:
+        d[s] = m.text
+
     i = steps.index(s)
     if i+1 < len(steps):
-        st["step"] = steps[i+1]; bot_shop.send_message(m.chat.id, prompts[st["step"]])
+        st["step"] = steps[i+1]
+        if st["step"] == "delivery_zone":
+            kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+            for zone in config.DELIVERY_ZONES.values():
+                kb.row(f"{zone['name']} — {zone['price']}₽")
+            kb.row("❌ Отмена")
+            bot_shop.send_message(m.chat.id,
+                "📝 Шаг 6/7: Выберите зону доставки\n━━━━━━━━━━━━━━━\n\nНажмите кнопку ниже:",
+                reply_markup=kb)
+        else:
+            bot_shop.send_message(m.chat.id, prompts[st["step"]])
     else:
-        d["commission"] = round(d["delivery_price"]*config.COMMISSION_PERCENT/100, 2)
-        d["courier_fee"] = round(d["delivery_price"]-d["commission"], 2)
+        d["commission"] = round(d["delivery_price"] * config.COMMISSION_PERCENT / 100, 2)
+        d["courier_fee"] = round(d["delivery_price"] - d["commission"], 2)
+        try:
+            client_tg_int = int(d["client_tg"].strip())
+        except:
+            client_tg_int = None
         oid = db("INSERT INTO orders (shop_id,shop_name,address_from,address_to,client_name,client_phone,client_tg_id,delivery_time,order_price,delivery_price,commission,courier_fee,comment,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                 (d["shop_id"], d["shop_name"], d["address_from"], d["address_to"], d["client_name"], d["client_phone"], d["client_tg"], d["delivery_time"], d["order_price"], d["delivery_price"], d["commission"], d["courier_fee"], d["comment"], now()))
+                 (d["shop_id"], d["shop_name"], d["address_from"], d["address_to"], d["client_name"], d["client_phone"], client_tg_int, d["delivery_time"], d["order_price"], d["delivery_price"], d["commission"], d["courier_fee"], d["comment"], now()))
         del order_reg[m.from_user.id]
         kb = types.InlineKeyboardMarkup()
         kb.add(types.InlineKeyboardButton("💳 Я оплатил", callback_data=f"paid_{oid}"))
-        bot_shop.send_message(m.chat.id, f"✅ Заявка #{oid} создана.\n\n💰 Оплата: {d['delivery_price']:.2f}\n💳 Карта: {config.CARD_NUMBER}", reply_markup=kb)
+        bot_shop.send_message(m.chat.id,
+            f"✅ Заявка #{oid} создана!\n"
+            f"━━━━━━━━━━━━━━━\n\n"
+            f"🏪 Магазин: {d['shop_name']}\n"
+            f"📍 Откуда: {d['address_from']}\n"
+            f"🎯 Куда: {d['address_to']}\n"
+            f"👤 Получатель: {d['client_name']}\n"
+            f"📞 Телефон: {d['client_phone']}\n"
+            f"🕐 Время: {d['delivery_time']}\n"
+            f"📍 Зона: {d.get('delivery_zone','-')}\n"
+            f"💰 Заказ: {d['order_price']:.2f} ₽\n"
+            f"🚚 Доставка: {d['delivery_price']:.2f} ₽\n"
+            f"💬 Комментарий: {d['comment']}\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"💳 Оплата на карту:\n"
+            f"{config.CARD_NUMBER}\n"
+            f"{config.CARD_HOLDER}\n"
+            f"{config.BANK_NAME}\n\n"
+            f"После оплаты нажмите кнопку:",
+            reply_markup=kb)
 
 @bot_shop.message_handler(func=lambda m: m.text=="📋 Мои заявки")
 def shop_orders(m):
