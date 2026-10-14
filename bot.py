@@ -173,7 +173,102 @@ def order_start(m):
         bot_shop.send_message(m.chat.id, "Доступ закрыт."); return
     order_reg[m.from_user.id] = {"step":"shop_name","d":{"shop_id":s[0]}}
     bot_shop.send_message(m.chat.id, "📦 Шаг 1/10: Название магазина", reply_markup=kb_cancel())
+@bot_shop.message_handler(commands=['register'])
+def shop_reg_start(m):
+    if db("SELECT id FROM shops WHERE tg_id=?", (m.from_user.id,), "one"):
+        bot_shop.send_message(m.chat.id, "Вы уже зарегистрированы."); return
+    shop_reg[m.from_user.id] = {"step":"name","d":{}}
+    bot_shop.send_message(m.chat.id, "Шаг 1/6: Название магазина", reply_markup=kb_cancel())
 
+@bot_shop.message_handler(func=lambda m: m.from_user.id in shop_reg)
+def shop_reg_step(m):
+    if is_cancel(m):
+        del shop_reg[m.from_user.id]
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("Зарегистрироваться", callback_data="start_register"))
+        bot_shop.send_message(m.chat.id, "Отменено", reply_markup=kb)
+        return
+    st = shop_reg[m.from_user.id]; s = st["step"]; d = st["d"]
+    if s == "phone":
+        t = m.text.replace(" ","").replace("-","").replace("(","").replace(")","")
+        if t.startswith("+7"): t = "8" + t[2:]
+        elif t.startswith("7") and len(t) == 11: t = "8" + t[1:]
+        if not t.isdigit() or len(t) != 11 or not t.startswith("8"):
+            bot_shop.send_message(m.chat.id, "Неверный номер. Формат: 8XXXXXXXXXX (11 цифр). Пример: 89917929251")
+            return
+        d[s] = t; st["step"] = "telegram"
+        bot_shop.send_message(m.chat.id, "Телефон принят. Шаг 4/6: Ваш Telegram. Отправьте @username или /skip")
+        return
+    if s == "telegram":
+        if m.text.startswith("/skip"): tg = f"@{m.from_user.username}" if m.from_user.username else "нет"
+        else: tg = m.text if m.text.startswith("@") else "@" + m.text
+        d[s] = tg; st["step"] = "vk"
+        bot_shop.send_message(m.chat.id, "Шаг 5/6: Ваш ВКонтакте")
+        return
+    d[s] = m.text
+    if s == "name":
+        st["step"] = "address"; bot_shop.send_message(m.chat.id, "Шаг 2/6: Адрес магазина")
+    elif s == "address":
+        st["step"] = "phone"; bot_shop.send_message(m.chat.id, "Шаг 3/6: Телефон. Формат: 8XXXXXXXXXX (11 цифр)")
+    elif s == "vk":
+        st["step"] = "owner_name"; bot_shop.send_message(m.chat.id, "Шаг 6/6: Ваше имя")
+    elif s == "owner_name":
+        db("INSERT INTO shops (tg_id,name,address,phone,telegram,vk,owner_name,created_at) VALUES (?,?,?,?,?,?,?,?)",
+           (m.from_user.id, d["name"], d["address"], d["phone"], d["telegram"], d["vk"], d["owner_name"], now()))
+        sid = db("SELECT id FROM shops WHERE tg_id=?", (m.from_user.id,), "one")[0]
+        del shop_reg[m.from_user.id]
+        bot_shop.send_message(m.chat.id, "Заявка отправлена. Ждём одобрения админа.", reply_markup=kb_shop())
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("Одобрить", callback_data=f"shop_ok_{sid}"),
+               types.InlineKeyboardButton("Отклонить", callback_data=f"shop_no_{sid}"))
+        bot_admin.send_message(config.ADMIN_ID,
+            f"НОВЫЙ МАГАЗИН\n{d['name']}\n{d['address']}\n{d['phone']}\n{d['telegram']}\n{d['vk']}\n{d['owner_name']}",
+            reply_markup=kb)
+
+# ========== ЗАЯВКА МАГАЗИНА ==========
+@bot_shop.message_handler(func=lambda m: m.text=="Создать заявку")
+def order_start(m):
+    s = db("SELECT * FROM shops WHERE tg_id=?", (m.from_user.id,), "one")
+    if not s or s[8]!="active":
+        bot_shop.send_message(m.chat.id, "Доступ закрыт."); return
+    order_reg[m.from_user.id] = {"step":"shop_name","d":{"shop_id":s[0]}}
+    bot_shop.send_message(m.chat.id, "Шаг 1/10: Название магазина", reply_markup=kb_cancel())
+
+@bot_shop.message_handler(func=lambda m: m.from_user.id in order_reg)
+def order_step(m):
+    if is_cancel(m):
+        del order_reg[m.from_user.id]
+        bot_shop.send_message(m.chat.id, "Отменено", reply_markup=kb_shop()); return
+    st = order_reg[m.from_user.id]; s = st["step"]; d = st["d"]
+    prompts = {"address_from":"Шаг 2/10: Откуда забрать","address_to":"Шаг 3/10: Куда отвезти",
+               "client_name":"Шаг 4/10: Имя клиента","client_phone":"Шаг 5/10: Телефон клиента",
+               "client_tg":"Шаг 6/10: TG ID клиента (цифры)","delivery_time":"Шаг 7/10: Ко скольким доставить",
+               "order_price":"Шаг 8/10: Сумма заказа","delivery_price":f"Шаг 9/10: Доставка (мин {config.MIN_DELIVERY})",
+               "comment":"Шаг 10/10: Комментарий для курьера"}
+    steps = ["shop_name","address_from","address_to","client_name","client_phone","client_tg","delivery_time","order_price","delivery_price","comment"]
+    if s == "client_tg":
+        if not m.text.strip().isdigit(): bot_shop.send_message(m.chat.id, "Только цифры."); return
+        d[s] = int(m.text.strip())
+    elif s in ("order_price","delivery_price"):
+        try: v = float(m.text.replace(",","."))
+        except: bot_shop.send_message(m.chat.id, "Введите число."); return
+        if s == "delivery_price" and v < config.MIN_DELIVERY:
+            bot_shop.send_message(m.chat.id, f"Минимум {config.MIN_DELIVERY}"); return
+        d[s] = v
+    else: d[s] = m.text
+    i = steps.index(s)
+    if i+1 < len(steps):
+        st["step"] = steps[i+1]; bot_shop.send_message(m.chat.id, prompts[st["step"]])
+    else:
+        d["commission"] = round(d["delivery_price"]*config.COMMISSION_PERCENT/100, 2)
+        d["courier_fee"] = round(d["delivery_price"]-d["commission"], 2)
+        oid = db("INSERT INTO orders (shop_id,shop_name,address_from,address_to,client_name,client_phone,client_tg_id,delivery_time,order_price,delivery_price,commission,courier_fee,comment,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 (d["shop_id"], d["shop_name"], d["address_from"], d["address_to"], d["client_name"], d["client_phone"], d["client_tg"], d["delivery_time"], d["order_price"], d["delivery_price"], d["commission"], d["courier_fee"], d["comment"], now()))
+        del order_reg[m.from_user.id]
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("Я оплатил", callback_data=f"paid_{oid}"))
+        bot_shop.send_message(m.chat.id, f"Заявка #{oid} создана. Оплата: {d['delivery_price']:.2f}. Карта: {config.CARD_NUMBER}", reply_markup=kb)
+        
 @bot_shop.message_handler(func=lambda m: m.from_user.id in order_reg)
 def order_step(m):
     if is_cancel(m):
