@@ -391,8 +391,7 @@ def order_step(m):
             "Например: 2500",
             reply_markup=kb_cancel())
         return
-
-    prompts = {
+        
     prompts = {
     "client_name": ("📝 Шаг 2/8: Имя получателя\n"
                     "━━━━━━━━━━━━━━━\n\n"
