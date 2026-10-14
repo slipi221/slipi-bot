@@ -403,11 +403,7 @@ def order_step(m):
             for zone in config.DELIVERY_ZONES.values():
                 kb.row(f"{zone['name']} — {zone['price']}₽")
             kb.row("❌ Отмена")
-bot_shop.send_message(
-    m.chat.id,
-    "📝 Шаг 6/8: Выберите зону доставки\n\nНажмите кнопку ниже:",
-    reply_markup=kb
-)
+            bot_shop.send_message(m.chat.id, "📝 Шаг 6/8: Выберите зону доставки. Нажмите кнопку ниже:", reply_markup=kb)
         else:
             bot_shop.send_message(m.chat.id, prompts[st["step"]])
     else:
