@@ -288,7 +288,6 @@ def cb_start_register(c):
     bot_shop.answer_callback_query(c.id)
 # ===== ЗАЯВКА МАГАЗИНА =====
 @bot_shop.message_handler(func=lambda m: m.text=="🆕 Создать заявку")
-@bot_shop.message_handler(func=lambda m: m.text=="🆕 Создать заявку")
 def order_start(m):
     s = db("SELECT * FROM shops WHERE tg_id=?", (m.from_user.id,), "one")
     if not s or s[8]!="active":
@@ -335,21 +334,46 @@ def order_step(m):
         return
 
     prompts = {
-        "address_to": "📝 Шаг 2/7: Имя получателя\n\nКак зовут клиента?",
-        "client_name": "📝 Шаг 3/7: Телефон получателя\n\nФормат: 8XXXXXXXXXX (11 цифр)\nПример: 89917929251",
-        "client_phone": (
-            "📝 Шаг 4/7: Telegram ID клиента\n"
-            "━━━━━━━━━━━━━━━\n\n"
-            "🔍 Как узнать ID:\n"
-            "1. Попросите клиента написать\n"
-            "   @userinfobot в Telegram\n"
-            "2. Бот пришлёт числовой ID\n"
-            "3. Пришлите сюда это число\n\n"
-            "⚠️ Если ID нет — отправьте -"
-        ),
-        "client_tg": "📝 Шаг 5/7: Время доставки\n\nНапример: Сегодня до 18:00",
-        "delivery_time": "",
-        "order_price": "📝 Шаг 7/7: Комментарий для курьера\n\nКод домофона, особенности адреса\n\nЕсли нечего — отправьте -",
+    "address_to": (
+        "📝 Шаг 2/8: Имя получателя\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "👤 Как зовут человека,\n"
+        "который получит букет?"
+    ),
+    "client_name": (
+        "📝 Шаг 3/8: Телефон получателя\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "📞 Формат: 8XXXXXXXXXX\n"
+        "Пример: 89917929251"
+    ),
+    "client_phone": (
+        "📝 Шаг 4/8: Telegram ID клиента\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "🔍 Как узнать ID:\n"
+        "1. Попросите клиента написать @userinfobot\n"
+        "2. Бот пришлёт число (например 123456789)\n"
+        "3. Пришлите это число сюда\n\n"
+        "⚠️ Если ID нет — отправьте -"
+    ),
+    "client_tg": (
+        "📝 Шаг 5/8: Время доставки\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "🕐 Например: Сегодня до 18:00"
+    ),
+    "delivery_time": None,
+    "delivery_zone": None,
+    "order_price": (
+        "📝 Шаг 7/8: Сумма заказа\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "💰 Стоимость букета в рублях\n"
+        "Например: 2500"
+    ),
+    "comment": (
+        "📝 Шаг 8/8: Комментарий\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        "💬 Код домофона, особенности адреса\n\n"
+        "Если нечего — отправьте -"
+    ),
     }
     steps = ["address_to","client_name","client_phone","client_tg","delivery_time","delivery_zone","order_price","comment"]
 
