@@ -378,13 +378,13 @@ def order_step(m):
     steps = ["address_to","client_name","client_phone","client_tg","delivery_time","delivery_zone","order_price","comment"]
 
     if s == "client_phone":
-        t = m.text.replace(" ","").replace("-","").replace("(","").replace(")","")
-        if t.startswith("+7"): t = "8" + t[2:]
-        elif t.startswith("7") and len(t) == 11: t = "8" + t[1:]
-        if not t.isdigit() or len(t) != 11 or not t.startswith("8"):
-            bot_shop.send_message(m.chat.id, "❌ Неверный номер. Формат: 8XXXXXXXXXX (11 цифр)")
-            return
-        d[s] = t
+    t = m.text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").replace("+", "")
+    if not t.isdigit() or len(t) < 10 or len(t) > 15:
+        bot_shop.send_message(m.chat.id, "❌ Неверный номер. Введите 10-15 цифр. Пример: 89917929251")
+        return
+    d[s] = m.text.strip()
+elif s == "client_tg":
+    d[s] = m.text.strip() if m.text.strip() else "-"
     elif s == "order_price":
         try: v = float(m.text.replace(",","."))
         except:
