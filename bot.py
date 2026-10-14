@@ -34,6 +34,7 @@ bot_admin = telebot.TeleBot(config.ADMIN_TOKEN)
 
 shop_reg, cour_reg, order_reg, withdraw_reg = {}, {}, {}, {}
 review_reg = {}
+shop_preview = {}
 
 def kb_shop():
     k = types.ReplyKeyboardMarkup(resize_keyboard=True)
@@ -213,17 +214,70 @@ def shop_reg_step(m):
     elif s == "vk":
         st["step"] = "owner_name"; bot_shop.send_message(m.chat.id, "Шаг 6/6: Ваше имя")
     elif s == "owner_name":
-        db("INSERT INTO shops (tg_id,name,address,phone,telegram,vk,owner_name,created_at) VALUES (?,?,?,?,?,?,?,?)",
-           (m.from_user.id, d["name"], d["address"], d["phone"], d["telegram"], d["vk"], d["owner_name"], now()))
-        sid = db("SELECT id FROM shops WHERE tg_id=?", (m.from_user.id,), "one")[0]
+        shop_preview[m.from_user.id] = d
         del shop_reg[m.from_user.id]
-        bot_shop.send_message(m.chat.id, "✅ Заявка отправлена. Ждём одобрения админа.", reply_markup=kb_shop())
-        kb = types.InlineKeyboardMarkup()
-        kb.add(types.InlineKeyboardButton("✅ Одобрить", callback_data=f"shop_ok_{sid}"),
-               types.InlineKeyboardButton("❌ Отклонить", callback_data=f"shop_no_{sid}"))
-        bot_admin.send_message(config.ADMIN_ID,
-            f"🏪 НОВЫЙ МАГАЗИН\n{d['name']}\n{d['address']}\n{d['phone']}\n{d['telegram']}\n{d['vk']}\n{d['owner_name']}",
-            reply_markup=kb)
+        show_shop_preview(m.chat.id, m.from_user.id)
+
+def show_shop_preview(chat_id, uid):
+    d = shop_preview.get(uid)
+    if not d: return
+    txt = (
+        f"🏪 Проверьте данные:\n\n"
+        f"📝 Название: {d.get('name','-')}\n"
+        f"📍 Адрес: {d.get('address','-')}\n"
+        f"📞 Телефон: {d.get('phone','-')}\n"
+        f"✈️ Telegram: {d.get('telegram','-')}\n"
+        f"📱 ВК: {d.get('vk','-')}\n"
+        f"👤 Имя: {d.get('owner_name','-')}\n\n"
+        f"Нажмите на поле, чтобы изменить:"
+    )
+    kb = types.InlineKeyboardMarkup()
+    kb.row(types.InlineKeyboardButton("📝 Название", callback_data="edit_name"),
+           types.InlineKeyboardButton("📍 Адрес", callback_data="edit_address"))
+    kb.row(types.InlineKeyboardButton("📞 Телефон", callback_data="edit_phone"),
+           types.InlineKeyboardButton("✈️ Telegram", callback_data="edit_telegram"))
+    kb.row(types.InlineKeyboardButton("📱 ВК", callback_data="edit_vk"),
+           types.InlineKeyboardButton("👤 Имя", callback_data="edit_owner_name"))
+    kb.row(types.InlineKeyboardButton("✅ Отправить", callback_data="submit_shop"),
+           types.InlineKeyboardButton("❌ Отмена", callback_data="cancel_shop"))
+    bot_shop.send_message(chat_id, txt, reply_markup=kb)
+
+@bot_shop.callback_query_handler(func=lambda c: c.data.startswith("edit_"))
+def cb_edit_field(c):
+    field = c.data.split("_", 1)[1]
+    uid = c.from_user.id
+    if uid not in shop_preview:
+        bot_shop.answer_callback_query(c.id, "Время истекло"); return
+    shop_reg[uid] = {"step": field, "d": shop_preview[uid]}
+    bot_shop.send_message(uid, f"Введите новое значение:", reply_markup=kb_cancel())
+    bot_shop.answer_callback_query(c.id)
+
+@bot_shop.callback_query_handler(func=lambda c: c.data == "submit_shop")
+def cb_submit_shop(c):
+    uid = c.from_user.id
+    d = shop_preview.get(uid)
+    if not d:
+        bot_shop.answer_callback_query(c.id, "Время истекло"); return
+    db("INSERT INTO shops (tg_id,name,address,phone,telegram,vk,owner_name,created_at) VALUES (?,?,?,?,?,?,?,?)",
+       (uid, d["name"], d["address"], d["phone"], d["telegram"], d["vk"], d["owner_name"], now()))
+    sid = db("SELECT id FROM shops WHERE tg_id=?", (uid,), "one")[0]
+    del shop_preview[uid]
+    bot_shop.edit_message_text("✅ Заявка отправлена. Ждём одобрения админа.", c.message.chat.id, c.message.message_id)
+    bot_shop.send_message(uid, "Главное меню:", reply_markup=kb_shop())
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("✅ Одобрить", callback_data=f"shop_ok_{sid}"),
+           types.InlineKeyboardButton("❌ Отклонить", callback_data=f"shop_no_{sid}"))
+    bot_admin.send_message(config.ADMIN_ID,
+        f"🏪 НОВЫЙ МАГАЗИН\n{d['name']}\n{d['address']}\n{d['phone']}\n{d['telegram']}\n{d['vk']}\n{d['owner_name']}",
+        reply_markup=kb)
+    bot_shop.answer_callback_query(c.id, "Отправлено")
+
+@bot_shop.callback_query_handler(func=lambda c: c.data == "cancel_shop")
+def cb_cancel_shop(c):
+    uid = c.from_user.id
+    if uid in shop_preview: del shop_preview[uid]
+    bot_shop.edit_message_text("❌ Отменено.", c.message.chat.id, c.message.message_id)
+    bot_shop.answer_callback_query(c.id)
 
 @bot_shop.callback_query_handler(func=lambda c: c.data == "start_register")
 def cb_start_register(c):
