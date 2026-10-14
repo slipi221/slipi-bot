@@ -425,7 +425,7 @@ def order_step(m):
     if s == "client_phone":
         t = m.text.replace(" ", "").replace("-", "").replace("(", "").replace(")", "").replace("+", "")
         if not t.isdigit() or len(t) < 10 or len(t) > 15:
-            bot_shop.send_message(m.chat.id, "❌ Неверный номер. Введите 10-15 цифр. Пример: 89917929251")
+            bot_shop.send_message(m.chat.id, "❌ Неверный номер. Введите 10-15 цифр. Пример: 89001234567")
             return
         d[s] = m.text.strip()
     elif s == "client_tg":
