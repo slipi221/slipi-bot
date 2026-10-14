@@ -825,13 +825,43 @@ def run_bot(bot, name):
 def shop_cancel_global(m):
     if m.from_user.id in shop_reg: del shop_reg[m.from_user.id]
     if m.from_user.id in order_reg: del order_reg[m.from_user.id]
-    bot_shop.send_message(m.chat.id, "Отменено.", reply_markup=kb_shop())
+    s = db("SELECT id FROM shops WHERE tg_id=?", (m.from_user.id,), "one")
+    if not s:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📝 Зарегистрироваться", callback_data="start_register"))
+        bot_shop.send_message(m.chat.id, "Отменено.\n\nЧтобы начать работу — зарегистрируйтесь:", reply_markup=kb)
+    else:
+        bot_shop.send_message(m.chat.id, "Отменено.", reply_markup=kb_shop())
+
+@bot_shop.callback_query_handler(func=lambda c: c.data == "start_register")
+def cb_start_register(c):
+    if db("SELECT id FROM shops WHERE tg_id=?", (c.from_user.id,), "one"):
+        bot_shop.answer_callback_query(c.id, "Вы уже зарегистрированы")
+        return
+    shop_reg[c.from_user.id] = {"step":"name","d":{}}
+    bot_shop.send_message(c.from_user.id, "📝 Шаг 1/6: Название магазина", reply_markup=kb_cancel())
+    bot_shop.answer_callback_query(c.id)
 
 @bot_courier.message_handler(func=lambda m: m.text=="❌ Отмена")
 def cour_cancel_global(m):
     if m.from_user.id in cour_reg: del cour_reg[m.from_user.id]
     if m.from_user.id in withdraw_reg: del withdraw_reg[m.from_user.id]
-    bot_courier.send_message(m.chat.id, "Отменено.", reply_markup=kb_courier())
+    c = db("SELECT id FROM couriers WHERE tg_id=?", (m.from_user.id,), "one")
+    if not c:
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📝 Зарегистрироваться", callback_data="start_register_cour"))
+        bot_courier.send_message(m.chat.id, "Отменено.\n\nЧтобы стать курьером — зарегистрируйтесь:", reply_markup=kb)
+    else:
+        bot_courier.send_message(m.chat.id, "Отменено.", reply_markup=kb_courier())
+
+@bot_courier.callback_query_handler(func=lambda c: c.data == "start_register_cour")
+def cb_start_register_cour(c):
+    if db("SELECT id FROM couriers WHERE tg_id=?", (c.from_user.id,), "one"):
+        bot_courier.answer_callback_query(c.id, "Вы уже зарегистрированы")
+        return
+    cour_reg[c.from_user.id] = {"step":"name","d":{}}
+    bot_courier.send_message(c.from_user.id, "📝 Шаг 1/5: Ваше имя", reply_markup=kb_cancel())
+    bot_courier.answer_callback_query(c.id)
 
 
 if __name__ == "__main__":
