@@ -125,9 +125,11 @@ def shop_reg_start(m):
 def shop_reg_step(m):
     if is_cancel(m):
         del shop_reg[m.from_user.id]
-        bot_shop.send_message(m.chat.id, "Отменено.", reply_markup=kb_shop()); return
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("📝 Зарегистрироваться", callback_data="start_register"))
+        bot_shop.send_message(m.chat.id, "Отменено.\n\nЧтобы начать работу — зарегистрируйтесь:", reply_markup=kb); return
     st = shop_reg[m.from_user.id]; s = st["step"]; d = st["d"]
-    if s == "phone":
+    if s == "phone
         t = m.text.replace(" ","").replace("-","").replace("(","").replace(")","")
         if t.startswith("+7"): t = "8" + t[2:]
         elif t.startswith("7") and len(t) == 11: t = "8" + t[1:]
