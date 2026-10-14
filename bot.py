@@ -5,7 +5,7 @@ import telebot
 from telebot import types
 import config
 
-DB = DB = "flower.db"
+DB = "flower.db"
 
 def db(q, p=(), fetch=None):
     con = sqlite3.connect(DB); cur = con.cursor(); cur.execute(q, p)
@@ -108,7 +108,7 @@ def client_about(m):
 def shop_start(m):
     s = db("SELECT * FROM shops WHERE tg_id=?", (m.from_user.id,), "one")
     if not s:
-        bot_shop.send_message(m.chat.id, "👋 Привет!\n\n🌸 Хотите стать магазином в SLIPI?\n\nОтправьте /register")
+        bot_shop.send_message(m.chat.id, "👋 Привет!\n\n🌸 Станьте партнёром сети SLIPI!\n\nОтправьте /register")
         return
     if s[8]=="pending": bot_shop.send_message(m.chat.id, "⏳ Заявка на рассмотрении.")
     elif s[8]=="blocked": bot_shop.send_message(m.chat.id, "🚫 Доступ закрыт.")
@@ -270,7 +270,7 @@ def cb_cancel_order(c):
 @bot_courier.message_handler(commands=['start'])
 def cour_start(m):
     c = db("SELECT * FROM couriers WHERE tg_id=?", (m.from_user.id,), "one")
-    if not c: bot_courier.send_message(m.chat.id, "👋 Привет!\n\n🚚 Хотите стать курьером SLIPI?\n\nОтправьте /register"); return
+    if not c: bot_courier.send_message(m.chat.id, "👋 Привет!\n\n🚚 Станьте частью команды курьеров SLIPI!\n\nОтправьте /register"); return
     if c[8]=="pending": bot_courier.send_message(m.chat.id, "⏳ Заявка на рассмотрении.")
     elif c[8]=="blocked": bot_courier.send_message(m.chat.id, "🚫 Доступ закрыт.")
     else: bot_courier.send_message(m.chat.id, f"🚚 Меню курьера\n━━━━━━━━━━━━━━━\n👤 {c[2]}\n💰 Баланс: {c[7]:.2f} ₽", reply_markup=kb_courier())
