@@ -5,7 +5,7 @@ import telebot
 from telebot import types
 import config
 
-DB = "flower.db"
+DB = DB = "/app/data/flower.db"
 
 def db(q, p=(), fetch=None):
     con = sqlite3.connect(DB); cur = con.cursor(); cur.execute(q, p)
