@@ -61,3 +61,9 @@ STATUS_TEXT = {
     "picked": "Забрал в магазине", "delivering": "Везёт клиенту",
     "at_client": "У клиента", "done": "Доставлено", "cancel": "Отменено",
 }
+DELIVERY_ZONES = {
+    "zone1": {"name": "🟢 Центр (до 5 км)", "price": 350},
+    "zone2": {"name": "🟡 Ближние (5-10 км)", "price": 450},
+    "zone3": {"name": "🟠 Средние (10-15 км)", "price": 600},
+    "zone4": {"name": "🔴 Дальние (15+ км)", "price": 800},
+}
