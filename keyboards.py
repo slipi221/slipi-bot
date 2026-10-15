@@ -803,3 +803,117 @@ def admin_logs_menu():
         [btn("🗑 Очистить", "admin_logs_clear")],
         [btn("🔙 Назад", "admin_main")],
     ])
+    # ═══════════════════════════════════════════
+#   МАГАЗИН — ДОПОЛНЕНИЯ
+# ═══════════════════════════════════════════
+def shop_main():
+    return kb([
+        [btn("📦 Мои товары", "shop_my_products")],
+        [btn("🏷 Категории", "shop_my_categories")],
+        [btn("📋 Новые заказы", "shop_new_orders")],
+        [btn("📊 Статистика и финансы", "shop_stats")],
+        [btn("⏰ Часы работы", "shop_work_hours")],
+        [btn("⚙️ Настройки", "shop_settings")],
+        [btn("🆘 Поддержка", "shop_support")],
+    ])
+
+
+def shop_products_menu():
+    return kb([
+        [btn("➕ Добавить товар", "shop_add_product")],
+        [btn("🔙 Назад", "shop_main")],
+    ])
+
+
+def shop_products_list(products: list):
+    rows = []
+    for p in products:
+        status = "✅" if p["is_active"] else "⏸"
+        rows.append([btn(f"{status} {p['title']} — {p['price']}", f"shop_prod_view_{p['id']}")])
+    rows.append([btn("➕ Добавить товар", "shop_add_product")])
+    rows.append([btn("🔙 Назад", "shop_main")])
+    return kb(rows)
+
+
+def shop_product_manage(product_id: int, is_active: bool = True):
+    toggle = "⏸ Скрыть" if is_active else "▶️ Показать"
+    return kb([
+        [btn("✏️ Изменить цену", f"shop_edit_price_{product_id}")],
+        [btn("📸 Изменить фото", f"shop_edit_photo_{product_id}")],
+        [btn(toggle, f"shop_toggle_{product_id}")],
+        [btn("🗑 Удалить", f"shop_delete_{product_id}")],
+        [btn("🔙 Назад", "shop_my_products")],
+    ])
+
+
+def shop_settings_menu():
+    return kb([
+        [btn("✏️ Название", "shop_set_name")],
+        [btn("✏️ Адрес", "shop_set_address")],
+        [btn("✏️ Телефон", "shop_set_phone")],
+        [btn("📍 Обновить гео", "shop_set_geo")],
+        [btn("⏰ Часы работы", "shop_work_hours")],
+        [btn("⏸ Приостановить", "shop_pause")],
+        [btn("🔙 Назад", "shop_main")],
+    ])
+
+
+def shop_work_hours_menu():
+    return kb([
+        [btn("✏️ Открытие", "shop_set_open")],
+        [btn("✏️ Закрытие", "shop_set_close")],
+        [btn("🔙 Назад", "shop_settings")],
+    ])
+
+
+def shop_stats_menu():
+    return kb([
+        [btn("📥 Запросить выплату", "shop_request_payout")],
+        [btn("🔙 Назад", "shop_main")],
+    ])
+
+
+def shop_support():
+    return kb([
+        [btn("🔙 Назад", "shop_main")],
+    ])
+
+
+def shop_categories_menu():
+    return kb([
+        [btn("➕ Добавить категорию", "shop_cat_add")],
+        [btn("➖ Убрать категорию", "shop_cat_remove")],
+        [btn("🔙 Назад", "shop_main")],
+    ])
+
+
+def shop_categories_remove(active_cats: list):
+    rows = []
+    for key, name in active_cats:
+        rows.append([btn(f"🗑 {name}", f"shop_cat_remove_{key}")])
+    rows.append([btn("🔙 Назад", "shop_my_categories")])
+    return kb(rows)
+
+
+def shop_reject_reasons(order_id: int):
+    return kb([
+        [btn("💐 Нет в наличии", f"shop_reject_reason_{order_id}_out_of_stock")],
+        [btn("⏰ Не успеваем", f"shop_reject_reason_{order_id}_too_long")],
+        [btn("🚫 Технические проблемы", f"shop_reject_reason_{order_id}_tech")],
+        [btn("💬 Другое", f"shop_reject_reason_{order_id}_other")],
+        [btn("🔙 Назад", f"shop_new_orders")],
+    ])
+
+
+def shop_order_new(order_id: int):
+    return kb([
+        [btn("✅ Принять", f"shop_accept_{order_id}")],
+        [btn("❌ Отклонить", f"shop_reject_{order_id}")],
+    ])
+
+
+def shop_paused_menu():
+    return kb([
+        [btn("▶️ Возобновить", "shop_resume")],
+        [btn("🆘 Поддержка", "shop_support")],
+    ])
