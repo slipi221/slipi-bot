@@ -41,14 +41,16 @@ SBP_PHONE   = "+7 991 792-92-51"
 
 # ═══════════════════════════════════════════
 #   ЗОНЫ ДОСТАВКИ
-#   (км_от, км_до, цена_клиенту, курьеру)
 # ═══════════════════════════════════════════
+# Максимальный радиус доставки (км)
+MAX_DELIVERY_RADIUS = 13
+
+# Зоны доставки: (км_от, км_до, цена_клиенту, курьеру)
 DELIVERY_ZONES = [
     (0,  3,   350, 280),   # до 3 км
     (3,  6,   420, 330),   # 3-6 км
     (6,  10,  500, 380),   # 6-10 км
-    (10, 15,  600, 450),   # 10-15 км
-    (15, 999, 700, 520),   # 15+ км
+    (10, 13,  600, 450),   # 10-13 км
 ]
 
 # Наценка платформы (СТУПЕНЧАТАЯ, с букета)
@@ -216,7 +218,6 @@ DELIVERY_SLOTS = {
 #   ФУНКЦИИ
 # ═══════════════════════════════════════════
 def get_markup(price: float) -> float:
-    """Наценка платформы по ступенькам."""
     for min_p, max_p, markup in MARKUP_STEPS:
         if min_p <= price < max_p:
             return markup
@@ -224,15 +225,17 @@ def get_markup(price: float) -> float:
 
 
 def get_client_price(shop_price: float) -> float:
-    """Цена для клиента = цена магазина + наценка."""
     return shop_price + get_markup(shop_price)
 
 
-def get_delivery_zone(distance_km: float) -> dict:
+def get_delivery_zone(distance_km: float) -> dict | None:
     """
     Возвращает параметры зоны по расстоянию.
-    {client_pays, courier_gets, platform_gets}
+    Если расстояние больше MAX_DELIVERY_RADIUS — возвращает None.
     """
+    if distance_km > MAX_DELIVERY_RADIUS:
+        return None
+
     for min_km, max_km, client_pays, courier_gets in DELIVERY_ZONES:
         if min_km <= distance_km < max_km:
             return {
@@ -240,7 +243,8 @@ def get_delivery_zone(distance_km: float) -> dict:
                 "courier_gets": courier_gets,
                 "platform_gets": client_pays - courier_gets,
             }
-    # Если дальше 999 км — берём последнюю зону
+
+    # На всякий случай — последняя зона
     last = DELIVERY_ZONES[-1]
     return {
         "client_pays": last[2],
