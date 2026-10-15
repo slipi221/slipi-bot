@@ -12,7 +12,10 @@ from sqlalchemy import select
 
 import config
 from database import init_db, async_session
-from models import Order, ClientEvent, Courier, Client, Shop, CourierDailyStat
+from models import (
+    Order, ClientEvent, Courier, Client, Shop,
+    DeliveryOrder, DeliveryPayment, CourierDailyStat,
+)
 from handlers import client as client_h
 from handlers import shop as shop_h
 from handlers import courier as courier_h
@@ -46,7 +49,7 @@ dp_admin.include_router(admin_h.router)
 
 
 # ═══════════════════════════════════════════
-#   ЕЖЕДНЕВНЫЕ БОНУСЫ (23:59)
+#   1. ЕЖЕДНЕВНЫЕ БОНУСЫ (23:59)
 # ═══════════════════════════════════════════
 async def daily_bonus_job():
     log.info("⏰ Запуск бонусов")
@@ -59,7 +62,7 @@ async def daily_bonus_job():
 
 
 # ═══════════════════════════════════════════
-#   АВТООТМЕНА (каждые 5 минут)
+#   2. АВТООТМЕНА ЗАКАЗОВ (каждые 5 минут)
 # ═══════════════════════════════════════════
 async def auto_cancel_job():
     try:
@@ -78,6 +81,7 @@ async def auto_cancel_job():
                     continue
                 elapsed = (now - o.wait_started_at).total_seconds() / 60
 
+                # Дневные (08:00–23:00) — 30 мин
                 if 8 <= now.hour < 23:
                     if elapsed >= config.DAY_ORDER_TIMEOUT_MINUTES:
                         await orders_service.cancel_order(
@@ -88,7 +92,9 @@ async def auto_cancel_job():
                         )
                         log.info(f"Автоотмена заказа #{o.id}")
 
-                        c_r = await session.execute(select(Client).where(Client.id == o.client_id))
+                        c_r = await session.execute(
+                            select(Client).where(Client.id == o.client_id)
+                        )
                         client = c_r.scalar_one_or_none()
                         if client and client.tg_id:
                             try:
@@ -105,7 +111,7 @@ async def auto_cancel_job():
 
 
 # ═══════════════════════════════════════════
-#   НАПОМИНАНИЯ О СОБЫТИЯХ (10:00)
+#   3. НАПОМИНАНИЯ О СОБЫТИЯХ (10:00)
 # ═══════════════════════════════════════════
 async def events_reminder_job():
     log.info("📅 Проверка событий")
@@ -113,6 +119,7 @@ async def events_reminder_job():
         async with async_session() as session:
             today = date.today()
 
+            # За 3 дня
             target_3 = today + timedelta(days=3)
             result = await session.execute(
                 select(ClientEvent).where(
@@ -121,7 +128,9 @@ async def events_reminder_job():
                 )
             )
             for e in result.scalars().all():
-                c_r = await session.execute(select(Client).where(Client.id == e.client_id))
+                c_r = await session.execute(
+                    select(Client).where(Client.id == e.client_id)
+                )
                 client = c_r.scalar_one_or_none()
                 if client and client.tg_id:
                     try:
@@ -136,6 +145,7 @@ async def events_reminder_job():
                     except Exception:
                         pass
 
+            # За 1 день
             target_1 = today + timedelta(days=1)
             result = await session.execute(
                 select(ClientEvent).where(
@@ -144,7 +154,9 @@ async def events_reminder_job():
                 )
             )
             for e in result.scalars().all():
-                c_r = await session.execute(select(Client).where(Client.id == e.client_id))
+                c_r = await session.execute(
+                    select(Client).where(Client.id == e.client_id)
+                )
                 client = c_r.scalar_one_or_none()
                 if client and client.tg_id:
                     try:
@@ -163,7 +175,7 @@ async def events_reminder_job():
 
 
 # ═══════════════════════════════════════════
-#   НАПОМИНАНИЕ О ФОТО (каждые 15 минут)
+#   4. НАПОМИНАНИЕ О ФОТО (каждые 15 минут)
 # ═══════════════════════════════════════════
 async def photo_reminder_job():
     try:
@@ -180,7 +192,9 @@ async def photo_reminder_job():
             for o in orders:
                 if not o.courier_id:
                     continue
-                c_r = await session.execute(select(Courier).where(Courier.id == o.courier_id))
+                c_r = await session.execute(
+                    select(Courier).where(Courier.id == o.courier_id)
+                )
                 courier = c_r.scalar_one_or_none()
                 if courier and courier.tg_id:
                     try:
@@ -196,20 +210,110 @@ async def photo_reminder_job():
 
 
 # ═══════════════════════════════════════════
+#   5. АВТООТМЕНА «СВОИХ ДОСТАВОК» (каждые 10 минут)
+# ═══════════════════════════════════════════
+async def delivery_autocancel_job():
+    """Отменяет доставки, которые магазин создал, но не оплатил за 2 часа."""
+    try:
+        async with async_session() as session:
+            result = await session.execute(
+                select(DeliveryOrder).where(
+                    DeliveryOrder.status == "pending",
+                    DeliveryOrder.payment_status == "pending",
+                )
+            )
+            deliveries = result.scalars().all()
+
+            now = datetime.now()
+            for d in deliveries:
+                if not d.created_at:
+                    continue
+                elapsed_min = (now - d.created_at).total_seconds() / 60
+                if elapsed_min >= 120:  # 2 часа
+                    d.status = "cancel"
+                    d.cancel_reason = "auto_no_payment"
+                    await session.commit()
+
+                    s_r = await session.execute(
+                        select(Shop).where(Shop.id == d.shop_id)
+                    )
+                    shop = s_r.scalar_one_or_none()
+                    if shop and shop.tg_id:
+                        try:
+                            await bot_shop.send_message(
+                                shop.tg_id,
+                                f"⏰ <b>Доставка #Д-{d.id} автоотменена</b>\n\n"
+                                f"Оплата не поступила в течение 2 часов."
+                            )
+                        except Exception:
+                            pass
+    except Exception as e:
+        log.error(f"Ошибка автоотмены доставок: {e}")
+
+
+# ═══════════════════════════════════════════
+#   6. НАПОМИНАНИЕ МАГАЗИНУ ПРО НЕПОДТВЕРЖДЁННЫЕ ДОСТАВКИ
+# ═══════════════════════════════════════════
+async def delivery_reminder_job():
+    """Напоминает магазинам про доставки, ждущие подтверждения."""
+    try:
+        async with async_session() as session:
+            result = await session.execute(
+                select(DeliveryOrder).where(
+                    DeliveryOrder.status == "paid",
+                )
+            )
+            deliveries = result.scalars().all()
+
+            for d in deliveries:
+                s_r = await session.execute(
+                    select(Shop).where(Shop.id == d.shop_id)
+                )
+                shop = s_r.scalar_one_or_none()
+                if shop and shop.tg_id:
+                    try:
+                        await bot_shop.send_message(
+                            shop.tg_id,
+                            f"⏳ <b>Доставка #Д-{d.id}</b>\n\n"
+                            f"Ожидает подтверждения админа.\n"
+                            f"Мы уже проверяем платёж 🔍"
+                        )
+                    except Exception:
+                        pass
+    except Exception as e:
+        log.error(f"Ошибка напоминаний: {e}")
+
+
+# ═══════════════════════════════════════════
 #   ПЛАНИРОВЩИК
 # ═══════════════════════════════════════════
 def setup_scheduler():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
+
+    # Бонусы в 23:59
     scheduler.add_job(daily_bonus_job, "cron", hour=23, minute=59)
+
+    # Автоотмена заказов каждые 5 минут
     scheduler.add_job(auto_cancel_job, "interval", minutes=5)
+
+    # События в 10:00
     scheduler.add_job(events_reminder_job, "cron", hour=10, minute=0)
+
+    # Напоминание о фото каждые 15 минут
     scheduler.add_job(photo_reminder_job, "interval", minutes=15)
+
+    # Автоотмена своих доставок каждые 10 минут
+    scheduler.add_job(delivery_autocancel_job, "interval", minutes=10)
+
+    # Напоминание магазину про неподтверждённые доставки каждые 30 минут
+    scheduler.add_job(delivery_reminder_job, "interval", minutes=30)
+
     scheduler.start()
-    log.info("⏰ Планировщик запущен")
+    log.info("⏰ Планировщик запущен (6 задач)")
 
 
 # ═══════════════════════════════════════════
-#   ЗАПУСК
+#   ЗАПУСК БОТОВ
 # ═══════════════════════════════════════════
 async def run_bot(bot, dp, name: str):
     try:
