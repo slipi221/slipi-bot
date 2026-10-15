@@ -40,19 +40,18 @@ SBP_PHONE   = "+7 991 792-92-51"
 
 
 # ═══════════════════════════════════════════
-#   ФИНАНСЫ
+#   ЗОНЫ ДОСТАВКИ
+#   (км_от, км_до, цена_клиенту, курьеру)
 # ═══════════════════════════════════════════
-COMMISSION_PERCENT = 25
-DELIVERY_PRICE = 350
+DELIVERY_ZONES = [
+    (0,  3,   350, 280),   # до 3 км
+    (3,  6,   420, 330),   # 3-6 км
+    (6,  10,  500, 380),   # 6-10 км
+    (10, 15,  600, 450),   # 10-15 км
+    (15, 999, 700, 520),   # 15+ км
+]
 
-BULK_DISCOUNT_PERCENT = 3
-BULK_DISCOUNT_MIN_BOUQUETS = 3
-
-CLIENT_WITHDRAW_COMMISSION = 5
-CLIENT_MIN_WITHDRAW = 500
-
-COURIER_MIN_WITHDRAW = 500
-
+# Наценка платформы (СТУПЕНЧАТАЯ, с букета)
 MARKUP_STEPS = [
     (0,     500,   50),
     (500,   1000,  100),
@@ -69,9 +68,21 @@ MARKUP_STEPS = [
 
 
 # ═══════════════════════════════════════════
+#   ФИНАНСЫ
+# ═══════════════════════════════════════════
+BULK_DISCOUNT_PERCENT = 3
+BULK_DISCOUNT_MIN_BOUQUETS = 3
+
+CLIENT_WITHDRAW_COMMISSION = 5
+CLIENT_MIN_WITHDRAW = 500
+
+COURIER_MIN_WITHDRAW = 500
+
+
+# ═══════════════════════════════════════════
 #   БОНУСЫ И РЕФЕРАЛКА
 # ═══════════════════════════════════════════
-BONUS_PER_10_ORDERS = 50
+BONUS_PER_10_ORDERS = 100
 REFERRAL_PERCENT = 5
 REFERRAL_MONTHS = 3
 
@@ -105,7 +116,7 @@ PREORDER_DAYS_AHEAD = 2
 #   ГЕО
 # ═══════════════════════════════════════════
 COURIER_GEO_UPDATE_MINUTES = 5
-NEARBY_SHOPS_RADIUS_KM = 10
+NEARBY_SHOPS_RADIUS_KM = 20
 
 
 # ═══════════════════════════════════════════
@@ -205,6 +216,7 @@ DELIVERY_SLOTS = {
 #   ФУНКЦИИ
 # ═══════════════════════════════════════════
 def get_markup(price: float) -> float:
+    """Наценка платформы по ступенькам."""
     for min_p, max_p, markup in MARKUP_STEPS:
         if min_p <= price < max_p:
             return markup
@@ -212,15 +224,29 @@ def get_markup(price: float) -> float:
 
 
 def get_client_price(shop_price: float) -> float:
+    """Цена для клиента = цена магазина + наценка."""
     return shop_price + get_markup(shop_price)
 
 
-def get_courier_fee(delivery_price: float = DELIVERY_PRICE) -> float:
-    return round(delivery_price * (100 - COMMISSION_PERCENT) / 100, 2)
-
-
-def get_platform_fee(delivery_price: float = DELIVERY_PRICE) -> float:
-    return round(delivery_price * COMMISSION_PERCENT / 100, 2)
+def get_delivery_zone(distance_km: float) -> dict:
+    """
+    Возвращает параметры зоны по расстоянию.
+    {client_pays, courier_gets, platform_gets}
+    """
+    for min_km, max_km, client_pays, courier_gets in DELIVERY_ZONES:
+        if min_km <= distance_km < max_km:
+            return {
+                "client_pays": client_pays,
+                "courier_gets": courier_gets,
+                "platform_gets": client_pays - courier_gets,
+            }
+    # Если дальше 999 км — берём последнюю зону
+    last = DELIVERY_ZONES[-1]
+    return {
+        "client_pays": last[2],
+        "courier_gets": last[3],
+        "platform_gets": last[2] - last[3],
+    }
 
 
 def get_category_name(key: str) -> str:
