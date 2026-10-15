@@ -6,7 +6,7 @@ from aiogram.fsm.state import State, StatesGroup
 
 
 # ═══════════════════════════════════════════
-#   КЛИЕНТ
+#   КЛИЕНТ — ОФОРМЛЕНИЕ ЗАКАЗА
 # ═══════════════════════════════════════════
 class OrderFSM(StatesGroup):
     address         = State()
@@ -39,7 +39,7 @@ class ClientFSM(StatesGroup):
 
 
 # ═══════════════════════════════════════════
-#   МАГАЗИН
+#   МАГАЗИН — РЕГИСТРАЦИЯ
 # ═══════════════════════════════════════════
 class ShopReg(StatesGroup):
     name         = State()
@@ -52,6 +52,9 @@ class ShopReg(StatesGroup):
     categories   = State()
 
 
+# ═══════════════════════════════════════════
+#   МАГАЗИН — ТОВАРЫ
+# ═══════════════════════════════════════════
 class ShopProduct(StatesGroup):
     photo        = State()
     title        = State()
@@ -70,10 +73,30 @@ class ShopEdit(StatesGroup):
     payout       = State()
     open_time    = State()
     close_time   = State()
+    support_msg  = State()
+    chat_message = State()
 
 
 # ═══════════════════════════════════════════
-#   КУРЬЕР
+#   МАГАЗИН — СВОЯ ДОСТАВКА
+# ═══════════════════════════════════════════
+class ShopDelivery(StatesGroup):
+    address       = State()
+    client_name   = State()
+    client_phone  = State()
+    date          = State()
+    time_period   = State()
+    time_slot     = State()
+    photo         = State()
+    shop_comment  = State()
+    client_comment = State()
+    need_photo    = State()
+    confirm       = State()
+    payment       = State()
+
+
+# ═══════════════════════════════════════════
+#   КУРЬЕР — РЕГИСТРАЦИЯ
 # ═══════════════════════════════════════════
 class CourierReg(StatesGroup):
     name         = State()
@@ -84,12 +107,15 @@ class CourierReg(StatesGroup):
     referral     = State()
 
 
+# ═══════════════════════════════════════════
+#   КУРЬЕР — РАБОТА
+# ═══════════════════════════════════════════
 class CourierFSM(StatesGroup):
     withdraw_amount  = State()
     problem_reason   = State()
     delivery_photo   = State()
     chat_message     = State()
-    shift_book       = State()
+    support_msg      = State()
 
 
 # ═══════════════════════════════════════════
@@ -113,3 +139,11 @@ class AdminFSM(StatesGroup):
     boost_custom      = State()
 
     reply_to_client   = State()
+
+    # Блокировка / разблокировка по ID
+    block_by_id       = State()
+    unblock_by_id     = State()
+
+    # Пополнение баланса
+    topup_shop_id     = State()
+    topup_amount      = State()
