@@ -2,7 +2,7 @@
 """
 SLIPI — бот магазина
 """
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from aiogram import Router, F
@@ -14,22 +14,23 @@ from sqlalchemy import select, update, delete
 
 import config
 import keyboards as kb
-from states import ShopReg, ShopProduct, ShopEdit
+from states import ShopReg, ShopProduct, ShopEdit, ShopDelivery
 from database import async_session
 from models import (
-    Shop, Product, ShopCategory, Order, OrderItem, Client, ChatMessage,
+    Shop, Product, ShopCategory, Order, OrderItem, Client, DeliveryOrder,
+    DeliveryPayment, CartItem,
 )
 from services import orders as orders_service
 from services import payments as payments_service
 from utils import helpers
 
-from bots import bot_shop, bot_admin
+from bots import bot_admin, bot_client
 
 router = Router(name="shop")
 
 
 # ═══════════════════════════════════════════
-#   ХЕЛПЕР
+#   ХЕЛПЕРЫ
 # ═══════════════════════════════════════════
 async def get_shop(session, tg_id: int):
     result = await session.execute(select(Shop).where(Shop.tg_id == tg_id))
@@ -74,8 +75,8 @@ async def cmd_start(message: Message, state: FSMContext):
 
     if shop.status == "blocked":
         await message.answer(
-            "🚫 Доступ закрыт.\n\n"
-            "Напишите в поддержку: " + config.SUPPORT_TG,
+            "🚫 <b>Доступ закрыт.</b>\n\n"
+            f"Напишите в поддержку: {config.SUPPORT_TG}",
             reply_markup=kb.shop_support()
         )
         return
@@ -214,13 +215,10 @@ async def reg_owner(message: Message, state: FSMContext):
 async def reg_geo(message: Message, state: FSMContext):
     await state.update_data(lat=message.location.latitude, lon=message.location.longitude)
     await state.set_state(ShopReg.categories)
-
-    # Показываем выбор категорий
-    active = []
     await message.answer(
         "📝 <b>Шаг 8/8:</b> Что вы продаёте?\n\n"
-        "Выберите категории (можно несколько), потом нажмите «Сохранить».",
-        reply_markup=kb.shop_categories_choice(active, config.CATEGORIES)
+        "Выберите категории (можно несколько), потом нажмите «💾 Сохранить».",
+        reply_markup=kb.shop_categories_choice([], config.CATEGORIES)
     )
 
 
@@ -270,7 +268,6 @@ async def reg_cat_save(call: CallbackQuery, state: FSMContext):
         session.add(shop)
         await session.flush()
 
-        # Сохраняем категории
         for cat in cats:
             session.add(ShopCategory(shop_id=shop.id, category=cat))
 
@@ -283,7 +280,6 @@ async def reg_cat_save(call: CallbackQuery, state: FSMContext):
         reply_markup=kb.shop_back()
     )
 
-    # Уведомление админу
     try:
         await bot_admin.send_message(
             config.ADMIN_ID,
@@ -318,7 +314,7 @@ async def my_products(call: CallbackQuery):
     if not products:
         await call.message.edit_text(
             "📦 У вас пока нет товаров.\n\n"
-            "Нажмите «Добавить товар» чтобы создать первый.",
+            "Нажмите «➕ Добавить товар» чтобы создать первый.",
             reply_markup=kb.shop_products_menu()
         )
         await call.answer()
@@ -472,7 +468,6 @@ async def add_cat(call: CallbackQuery, state: FSMContext):
         )
         session.add(product)
 
-        # Добавляем категорию магазину, если её нет
         cat_check = await session.execute(
             select(ShopCategory).where(
                 ShopCategory.shop_id == shop.id,
@@ -530,7 +525,7 @@ async def cat_add(call: CallbackQuery, state: FSMContext):
     await state.set_state(ShopReg.categories)
     await state.update_data(reg_cats=active, edit_mode=True)
     await call.message.edit_text(
-        "🏷 <b>Выберите категории:</b>\n\nОтметьте нужные, потом «Сохранить»",
+        "🏷 <b>Выберите категории:</b>\n\nОтметьте нужные, потом «💾 Сохранить»",
         reply_markup=kb.shop_categories_choice(active, config.CATEGORIES)
     )
     await call.answer()
@@ -564,7 +559,6 @@ async def cat_remove(call: CallbackQuery):
                 ShopCategory.category == cat,
             )
         )
-        # Скрываем товары этой категории
         await session.execute(
             update(Product).where(
                 Product.shop_id == shop.id,
@@ -652,7 +646,6 @@ async def shop_accept(call: CallbackQuery):
 
     if client and client.tg_id:
         try:
-            from bots import bot_client
             await bot_client.send_message(
                 client.tg_id,
                 f"🟢 <b>Магазин принял ваш заказ #{order_id}!</b>\n\n"
@@ -691,7 +684,6 @@ async def shop_reject_reason(call: CallbackQuery):
             refund=True,
         )
 
-        # Автоскрытие товара при "нет в наличии"
         if reason == "out_of_stock" and order:
             items_r = await session.execute(
                 select(OrderItem).where(OrderItem.order_id == order_id)
@@ -719,7 +711,6 @@ async def shop_reject_reason(call: CallbackQuery):
         }.get(reason, reason)
 
         try:
-            from bots import bot_client
             await bot_client.send_message(
                 client.tg_id,
                 f"😔 <b>Магазин отклонил заказ #{order_id}</b>\n\n"
@@ -729,6 +720,456 @@ async def shop_reject_reason(call: CallbackQuery):
         except Exception:
             pass
 
+    await call.answer()
+
+
+# ═══════════════════════════════════════════
+#   СВОЯ ДОСТАВКА — СОЗДАНИЕ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "shop_create_delivery")
+async def del_start(call: CallbackQuery, state: FSMContext):
+    async with async_session() as session:
+        shop = await get_shop(session, call.from_user.id)
+    if not shop:
+        await call.answer("Ошибка", show_alert=True)
+        return
+
+    await state.clear()
+    await state.set_state(ShopDelivery.address)
+    await call.message.edit_text(
+        "🚚 <b>Создание доставки</b>\n\n"
+        f"📍 Откуда: <b>{shop.address}</b>\n\n"
+        "📝 <b>Шаг 1/9:</b> Куда доставить?\n\n"
+        "<i>Например: ул. Ленина 5, кв. 10</i>",
+        reply_markup=kb.shop_delivery_cancel()
+    )
+    await call.answer()
+
+
+@router.message(ShopDelivery.address)
+async def del_address(message: Message, state: FSMContext):
+    await state.update_data(to_address=message.text.strip())
+    await state.set_state(ShopDelivery.client_name)
+    await message.answer(
+        "📝 <b>Шаг 2/9:</b> Как зовут получателя?",
+        reply_markup=kb.shop_delivery_cancel()
+    )
+
+
+@router.message(ShopDelivery.client_name)
+async def del_name(message: Message, state: FSMContext):
+    await state.update_data(client_name=message.text.strip())
+    await state.set_state(ShopDelivery.client_phone)
+    await message.answer(
+        "📝 <b>Шаг 3/9:</b> Телефон получателя\n"
+        "Формат: +79991234567",
+        reply_markup=kb.shop_delivery_cancel()
+    )
+
+
+@router.message(ShopDelivery.client_phone)
+async def del_phone(message: Message, state: FSMContext):
+    if not helpers.is_valid_phone(message.text):
+        await message.answer("❌ Неверный номер.")
+        return
+    await state.update_data(client_phone=helpers.clean_phone(message.text))
+    await state.set_state(ShopDelivery.date)
+    await message.answer(
+        "📝 <b>Шаг 4/9:</b> Когда доставить?",
+        reply_markup=kb.shop_delivery_date()
+    )
+
+
+@router.callback_query(F.data.startswith("shop_del_date_"), ShopDelivery.date)
+async def del_date(call: CallbackQuery, state: FSMContext):
+    from datetime import timedelta
+    part = call.data.replace("shop_del_date_", "")
+    if part == "today":
+        d = date.today()
+    elif part == "tomorrow":
+        d = date.today() + timedelta(days=1)
+    else:
+        d = date.today() + timedelta(days=2)
+    await state.update_data(delivery_date=str(d))
+    await state.set_state(ShopDelivery.time_period)
+    await call.message.edit_text(
+        "📝 <b>Шаг 5/9:</b> Выберите период:",
+        reply_markup=kb.shop_delivery_period()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("shop_del_period_"), ShopDelivery.time_period)
+async def del_period(call: CallbackQuery, state: FSMContext):
+    period = call.data.replace("shop_del_period_", "")
+    await state.update_data(period=period)
+    await state.set_state(ShopDelivery.time_slot)
+    await call.message.edit_text(
+        "🕒 Выберите время:",
+        reply_markup=kb.shop_delivery_slot(period)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "shop_del_back_period", ShopDelivery.time_slot)
+async def del_back_period(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ShopDelivery.time_period)
+    await call.message.edit_text(
+        "📝 Выберите период:",
+        reply_markup=kb.shop_delivery_period()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("shop_del_slot_"), ShopDelivery.time_slot)
+async def del_slot(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    slot = parts[-1]
+    await state.update_data(delivery_slot=slot)
+    await state.set_state(ShopDelivery.photo)
+    await call.message.edit_text(
+        "📸 <b>Шаг 6/9:</b> Фото букета\n\n"
+        "Прикрепите фото — курьер увидит, что везёт.\n\n"
+        "Отправьте фото или пропустите.",
+        reply_markup=kb.shop_delivery_photo()
+    )
+    await call.answer()
+
+
+@router.message(ShopDelivery.photo, F.photo)
+async def del_photo(message: Message, state: FSMContext):
+    await state.update_data(bouquet_photo_id=message.photo[-1].file_id)
+    await state.set_state(ShopDelivery.shop_comment)
+    await message.answer(
+        "💬 <b>Шаг 7/9:</b> Комментарий магазина\n\n"
+        "<i>Например: Букет в коробке, не переворачивать</i>\n\n"
+        "Напишите или /skip",
+        reply_markup=kb.shop_delivery_comment_skip()
+    )
+
+
+@router.callback_query(F.data == "shop_del_photo_skip", ShopDelivery.photo)
+async def del_photo_skip(call: CallbackQuery, state: FSMContext):
+    await state.update_data(bouquet_photo_id=None)
+    await state.set_state(ShopDelivery.shop_comment)
+    await call.message.edit_text(
+        "💬 <b>Шаг 7/9:</b> Комментарий магазина\n\n"
+        "<i>Например: Букет в коробке, не переворачивать</i>\n\n"
+        "Напишите или /skip",
+        reply_markup=kb.shop_delivery_comment_skip()
+    )
+    await call.answer()
+
+
+@router.message(ShopDelivery.shop_comment)
+async def del_shop_comment(message: Message, state: FSMContext):
+    txt = "" if message.text.startswith("/skip") else message.text.strip()
+    await state.update_data(shop_comment=txt)
+    await state.set_state(ShopDelivery.client_comment)
+    await message.answer(
+        "💬 <b>Шаг 8/9:</b> Комментарий клиента\n\n"
+        "<i>Например: Позвонить за 10 минут до приезда</i>\n\n"
+        "Напишите или /skip",
+        reply_markup=kb.shop_delivery_comment_skip()
+    )
+
+
+@router.callback_query(F.data == "shop_del_comment_skip", ShopDelivery.shop_comment)
+async def del_shop_comment_skip(call: CallbackQuery, state: FSMContext):
+    await state.update_data(shop_comment=None)
+    await state.set_state(ShopDelivery.client_comment)
+    await call.message.edit_text(
+        "💬 <b>Шаг 8/9:</b> Комментарий клиента\n\n"
+        "<i>Например: Позвонить за 10 минут до приезда</i>\n\n"
+        "Напишите или /skip",
+        reply_markup=kb.shop_delivery_comment_skip()
+    )
+    await call.answer()
+
+
+@router.message(ShopDelivery.client_comment)
+async def del_client_comment(message: Message, state: FSMContext):
+    txt = "" if message.text.startswith("/skip") else message.text.strip()
+    await state.update_data(client_comment=txt)
+    await state.set_state(ShopDelivery.need_photo)
+    await message.answer(
+        "📸 <b>Шаг 9/9:</b> Фото вручения?\n\n"
+        "Курьер сфотографирует момент передачи букета получателю.",
+        reply_markup=kb.shop_delivery_need_photo()
+    )
+
+
+@router.callback_query(F.data == "shop_del_comment_skip2", ShopDelivery.client_comment)
+async def del_client_comment_skip(call: CallbackQuery, state: FSMContext):
+    await state.update_data(client_comment=None)
+    await state.set_state(ShopDelivery.need_photo)
+    await call.message.edit_text(
+        "📸 <b>Шаг 9/9:</b> Фото вручения?",
+        reply_markup=kb.shop_delivery_need_photo()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("shop_del_needphoto_"), ShopDelivery.need_photo)
+async def del_needphoto(call: CallbackQuery, state: FSMContext):
+    part = call.data.replace("shop_del_needphoto_", "")
+    need = part == "yes"
+    await state.update_data(need_delivery_photo=need)
+
+    data = await state.get_data()
+
+    # Считаем расстояние (простая логика: пока считаем по первой зоне, если нет гео-точки)
+    # В идеале — через геокодер. Пока — по выбору магазина (в ТЗ).
+    # Берём зону по умолчанию (0–3 км) для нового заказа.
+    # Магазин может поменять через "Редактировать".
+    distance_km = 3  # по умолчанию
+    zone = config.get_delivery_zone(distance_km)
+    if zone is None:
+        await call.message.edit_text(
+            "🌷 Извините, адрес слишком далеко.",
+            reply_markup=kb.shop_back()
+        )
+        await state.clear()
+        await call.answer()
+        return
+
+    client_pays = zone["client_pays"]
+    courier_fee = zone["courier_gets"]
+    platform_fee = zone["platform_gets"]
+
+    await state.update_data(
+        distance_km=distance_km,
+        client_pays=client_pays,
+        courier_fee=courier_fee,
+        platform_fee=platform_fee,
+    )
+
+    text = (
+        f"🧾 <b>Проверьте заявку</b>\n\n"
+        f"📍 Откуда: {data.get('from_address', '—')}\n"
+        f"📍 Куда: {data['to_address']}\n"
+        f"👤 {data['client_name']}, {data['client_phone']}\n"
+        f"📅 {data['delivery_date']} | 🕒 {data['delivery_slot']}\n"
+    )
+    if data.get("bouquet_photo_id"):
+        text += "📸 Фото букета: ✅\n"
+    if data.get("shop_comment"):
+        text += f"💬 Магазин: {data['shop_comment']}\n"
+    if data.get("client_comment"):
+        text += f"💬 Клиент: {data['client_comment']}\n"
+    text += f"📸 Фото вручения: {'✅ Да' if need else '⏭ Нет'}\n\n"
+    text += f"💰 <b>Доставка: {helpers.money(client_pays)}</b>\n\n"
+    text += f"💳 Вы переводите нам: <b>{helpers.money(client_pays)}</b>"
+
+    await state.set_state(ShopDelivery.confirm)
+    await call.message.edit_text(text, reply_markup=kb.shop_delivery_confirm())
+    await call.answer()
+
+
+@router.callback_query(F.data == "shop_del_confirm", ShopDelivery.confirm)
+async def del_confirm(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    async with async_session() as session:
+        shop = await get_shop(session, call.from_user.id)
+        if not shop:
+            await call.answer("Ошибка", show_alert=True)
+            return
+
+        delivery = DeliveryOrder(
+            shop_id=shop.id,
+            from_address=shop.address or "",
+            from_lat=float(shop.lat) if shop.lat else None,
+            from_lon=float(shop.lon) if shop.lon else None,
+            to_address=data["to_address"],
+            client_name=data["client_name"],
+            client_phone=data["client_phone"],
+            delivery_date=datetime.strptime(data["delivery_date"], "%Y-%m-%d").date(),
+            delivery_slot=data["delivery_slot"],
+            bouquet_photo_id=data.get("bouquet_photo_id"),
+            shop_comment=data.get("shop_comment"),
+            client_comment=data.get("client_comment"),
+            need_delivery_photo=data.get("need_delivery_photo", False),
+            distance_km=data["distance_km"],
+            client_pays=Decimal(str(data["client_pays"])),
+            courier_fee=Decimal(str(data["courier_fee"])),
+            platform_fee=Decimal(str(data["platform_fee"])),
+            status="pending",
+            payment_status="pending",
+        )
+        session.add(delivery)
+        await session.flush()
+
+        # Платёж
+        payment = DeliveryPayment(
+            delivery_id=delivery.id,
+            shop_id=shop.id,
+            amount=Decimal(str(data["client_pays"])),
+            status="pending",
+        )
+        session.add(payment)
+        await session.commit()
+
+        delivery_id = delivery.id
+
+    await state.set_state(ShopDelivery.payment)
+    await call.message.edit_text(
+        f"💳 <b>Оплата доставки #{delivery_id}</b>\n\n"
+        f"Сумма: <b>{helpers.money(data['client_pays'])}</b>\n\n"
+        f"Переведите на карту:\n"
+        f"<code>{config.CARD_NUMBER}</code>\n"
+        f"Получатель: {config.CARD_HOLDER}\n"
+        f"Банк: {config.BANK_NAME}\n\n"
+        f"⚠️ <b>В комментарии укажите: Д-{delivery_id}</b>\n\n"
+        f"После перевода нажмите «✅ Я перевёл».",
+        reply_markup=kb.shop_delivery_payment(delivery_id)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("shop_del_paid_"))
+async def del_paid(call: CallbackQuery, state: FSMContext):
+    delivery_id = int(call.data.split("_")[3])
+
+    async with async_session() as session:
+        shop = await get_shop(session, call.from_user.id)
+        d_r = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == delivery_id))
+        delivery = d_r.scalar_one_or_none()
+        if not delivery:
+            await call.answer("Не найдено", show_alert=True)
+            return
+        delivery.payment_status = "pending"
+
+        p_r = await session.execute(
+            select(DeliveryPayment).where(DeliveryPayment.delivery_id == delivery_id)
+        )
+        payment = p_r.scalar_one_or_none()
+        if payment:
+            payment.status = "pending"
+
+        await session.commit()
+
+    await state.clear()
+    await call.message.edit_text(
+        f"✅ <b>Заявка на доставку #{delivery_id} создана!</b>\n\n"
+        f"Ждём подтверждения от админа.\n"
+        f"После подтверждения заявка уйдёт курьерам 🚴",
+        reply_markup=kb.shop_main()
+    )
+
+    # Уведомление админу
+    try:
+        await bot_admin.send_message(
+            config.ADMIN_ID,
+            f"🚚 <b>Новая заявка на доставку #Д-{delivery_id}</b>\n\n"
+            f"🏪 Магазин: {shop.name if shop else '—'}\n"
+            f"💰 Сумма: {helpers.money(delivery.client_pays)}\n\n"
+            f"Проверьте оплату в банке (комментарий <b>Д-{delivery_id}</b>)."
+        )
+    except Exception:
+        pass
+
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("shop_del_cancel_"))
+async def del_cancel(call: CallbackQuery, state: FSMContext):
+    delivery_id = int(call.data.split("_")[3])
+    async with async_session() as session:
+        d_r = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == delivery_id))
+        delivery = d_r.scalar_one_or_none()
+        if delivery:
+            delivery.status = "cancel"
+            delivery.cancel_reason = "shop_cancelled"
+            await session.commit()
+
+    await state.clear()
+    await call.answer("❌ Отменено", show_alert=True)
+    await show_shop_menu(call.message, 
+                         await get_shop_from_callback(call), edit=True)
+
+
+async def get_shop_from_callback(call: CallbackQuery):
+    async with async_session() as session:
+        return await get_shop(session, call.from_user.id)
+
+
+# ═══════════════════════════════════════════
+#   МОИ ДОСТАВКИ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "shop_my_deliveries")
+async def my_deliveries(call: CallbackQuery):
+    async with async_session() as session:
+        shop = await get_shop(session, call.from_user.id)
+        if not shop:
+            await call.answer("Ошибка", show_alert=True)
+            return
+        result = await session.execute(
+            select(DeliveryOrder)
+            .where(DeliveryOrder.shop_id == shop.id)
+            .order_by(DeliveryOrder.id.desc())
+            .limit(20)
+        )
+        deliveries = result.scalars().all()
+
+    if not deliveries:
+        await call.message.edit_text(
+            "🚚 У вас пока нет доставок.\n\n"
+            "Нажмите «🚚 Создать доставку» чтобы создать первую.",
+            reply_markup=kb.shop_back()
+        )
+        await call.answer()
+        return
+
+    items = [{
+        "id": d.id,
+        "to_address": d.to_address,
+        "status": d.status,
+    } for d in deliveries]
+
+    await call.message.edit_text(
+        f"🚚 <b>Мои доставки ({len(deliveries)})</b>",
+        reply_markup=kb.shop_my_deliveries(items)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("shop_del_view_"))
+async def del_view(call: CallbackQuery):
+    delivery_id = int(call.data.split("_")[3])
+    async with async_session() as session:
+        d_r = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == delivery_id))
+        d = d_r.scalar_one_or_none()
+        if not d:
+            await call.answer("Не найдено", show_alert=True)
+            return
+
+    status_map = {
+        "pending": "⏸ Ожидает оплаты",
+        "paid": "💳 Оплачено, ждёт админа",
+        "confirmed": "✅ Подтверждено, ищем курьера",
+        "going": "🚴 Курьер в пути",
+        "picked": "📦 Курьер забрал",
+        "at_client": "📍 Курьер у клиента",
+        "done": "✅ Доставлено",
+        "cancel": "❌ Отменено",
+    }
+
+    text = (
+        f"🚚 <b>Доставка #Д-{d.id}</b>\n"
+        f"{status_map.get(d.status, d.status)}\n\n"
+        f"📍 Откуда: {d.from_address}\n"
+        f"📍 Куда: {d.to_address}\n"
+        f"👤 {d.client_name}, {d.client_phone}\n"
+        f"📅 {helpers.format_date(d.delivery_date)} | 🕒 {d.delivery_slot or '—'}\n\n"
+        f"💰 Оплачено: {helpers.money(d.client_pays)}"
+    )
+
+    can_cancel = d.status in ("pending", "paid")
+    await call.message.edit_text(
+        text,
+        reply_markup=kb.shop_delivery_view(delivery_id, can_cancel)
+    )
     await call.answer()
 
 
@@ -854,7 +1295,6 @@ async def resume_shop(call: CallbackQuery):
     await show_shop_menu(call.message, shop, edit=True)
 
 
-# Изменение названия
 @router.callback_query(F.data == "shop_set_name")
 async def set_name_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(ShopEdit.name)
@@ -872,7 +1312,6 @@ async def set_name(message: Message, state: FSMContext):
     await message.answer("✅ Название обновлено.", reply_markup=kb.shop_main())
 
 
-# Изменение адреса
 @router.callback_query(F.data == "shop_set_address")
 async def set_addr_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(ShopEdit.address)
@@ -890,7 +1329,6 @@ async def set_addr(message: Message, state: FSMContext):
     await message.answer("✅ Адрес обновлён.", reply_markup=kb.shop_main())
 
 
-# Изменение телефона
 @router.callback_query(F.data == "shop_set_phone")
 async def set_phone_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(ShopEdit.phone)
@@ -911,7 +1349,6 @@ async def set_phone(message: Message, state: FSMContext):
     await message.answer("✅ Телефон обновлён.", reply_markup=kb.shop_main())
 
 
-# Обновление гео
 @router.callback_query(F.data == "shop_set_geo")
 async def set_geo_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(ShopEdit.geo)
@@ -933,7 +1370,6 @@ async def set_geo(message: Message, state: FSMContext):
     await message.answer("✅ Гео обновлено.", reply_markup=kb.shop_main())
 
 
-# Часы работы
 @router.callback_query(F.data == "shop_work_hours")
 async def work_hours(call: CallbackQuery):
     async with async_session() as session:
