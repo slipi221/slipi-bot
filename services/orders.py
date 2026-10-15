@@ -19,7 +19,7 @@ from utils import helpers
 # ═══════════════════════════════════════════
 #   РАСЧЁТЫ
 # ═══════════════════════════════════════════
-def calculate_cart_total(items: list) -> dict:
+def calculate_cart_total(items: list, distance_km: float = 0) -> dict:
     items_total = Decimal("0")
     bouquets_count = 0
 
@@ -35,7 +35,12 @@ def calculate_cart_total(items: list) -> dict:
     if bouquets_count >= config.BULK_DISCOUNT_MIN_BOUQUETS:
         discount = (items_total * Decimal(str(config.BULK_DISCOUNT_PERCENT)) / Decimal("100")).quantize(Decimal("0.01"))
 
-    delivery = Decimal(str(config.DELIVERY_PRICE))
+    zone = config.get_delivery_zone(distance_km)
+    if zone is None:
+        delivery = Decimal("0")
+    else:
+        delivery = Decimal(str(zone["client_pays"]))
+
     total = items_total - discount + delivery
 
     return {
@@ -44,18 +49,21 @@ def calculate_cart_total(items: list) -> dict:
         "delivery": delivery,
         "total": total.quantize(Decimal("0.01")),
         "bouquets_count": bouquets_count,
+        "zone": zone,
     }
 
 
-def calculate_platform_income(items: list) -> Decimal:
+def calculate_platform_income(items: list, distance_km: float = 0) -> Decimal:
     markup_total = Decimal("0")
     for item in items:
         product = item["product"]
         qty = item["quantity"]
         markup_total += Decimal(str(product.markup)) * qty
 
-    delivery_commission = Decimal(str(config.get_platform_fee()))
-    return (markup_total + delivery_commission).quantize(Decimal("0.01"))
+    zone = config.get_delivery_zone(distance_km)
+    delivery_income = Decimal(str(zone["platform_gets"])) if zone else Decimal("0")
+
+    return (markup_total + delivery_income).quantize(Decimal("0.01"))
 
 
 # ═══════════════════════════════════════════
@@ -109,6 +117,7 @@ async def create_order_from_cart(
     comment: str = None,
     promo_code: str = None,
     need_photo: bool = True,
+    distance_km: float = 0,
 ) -> Order | None:
     result = await session.execute(
         select(CartItem).where(CartItem.client_id == client_id)
@@ -134,8 +143,11 @@ async def create_order_from_cart(
     if not items:
         return None
 
-    totals = calculate_cart_total(items)
-    platform_income = calculate_platform_income(items)
+    totals = calculate_cart_total(items, distance_km)
+    if totals["zone"] is None:
+        return None
+
+    platform_income = calculate_platform_income(items, distance_km)
 
     promo_discount = Decimal("0")
     promo_obj = None
@@ -164,6 +176,7 @@ async def create_order_from_cart(
         discount=totals["discount"] + promo_discount,
         total_price=final_total,
         platform_income=platform_income,
+        courier_fee=Decimal(str(totals["zone"]["courier_gets"])),
         need_delivery_photo=need_photo,
         promo_code=promo_code,
     )
@@ -198,7 +211,6 @@ async def create_order_from_cart(
     )
     session.add(payment)
 
-    # Учёт промокода
     if promo_obj:
         promo_obj.used_count += 1
         session.add(PromoUse(
@@ -285,7 +297,7 @@ async def complete_order(session: AsyncSession, order_id: int):
     order.status = "done"
     order.delivered_at = datetime.now()
 
-    courier_fee = Decimal(str(config.get_courier_fee(float(order.delivery_price))))
+    courier_fee = Decimal(str(order.courier_fee or config.get_courier_fee(float(order.delivery_price))))
     courier_fee += Decimal(str(order.boost_amount or 0))
 
     items_result = await session.execute(
@@ -456,11 +468,6 @@ async def get_courier_active_orders(session: AsyncSession, courier_id: int):
 #   ПОВТОРИТЬ ЗАКАЗ
 # ═══════════════════════════════════════════
 async def repeat_order(session: AsyncSession, order_id: int, client_id: int) -> dict:
-    """
-    Добавляет товары из старого заказа в корзину.
-    Возвращает {ok: bool, added: int, skipped: int}
-    """
-    # Очищаем корзину
     from sqlalchemy import delete
     await session.execute(delete(CartItem).where(CartItem.client_id == client_id))
 
