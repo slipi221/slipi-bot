@@ -6,9 +6,7 @@ import asyncio
 import logging
 from datetime import datetime, date, timedelta
 
-from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
+from aiogram import Dispatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 
@@ -23,28 +21,14 @@ from services import bonuses as bonuses_service
 from services import orders as orders_service
 from utils import helpers
 
+from bots import bot_client, bot_shop, bot_courier, bot_admin
+
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("slipi")
-
-
-# ═══════════════════════════════════════════
-#   БОТЫ
-# ═══════════════════════════════════════════
-def make_bot(token: str) -> Bot:
-    return Bot(
-        token=token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
-
-
-bot_client = make_bot(config.CLIENT_TOKEN)
-bot_shop = make_bot(config.SHOP_TOKEN)
-bot_courier = make_bot(config.COURIER_TOKEN)
-bot_admin = make_bot(config.ADMIN_TOKEN)
 
 
 # ═══════════════════════════════════════════
@@ -78,7 +62,6 @@ async def daily_bonus_job():
 #   АВТООТМЕНА (каждые 5 минут)
 # ═══════════════════════════════════════════
 async def auto_cancel_job():
-    """Отменяет заказы, где магазин не ответил вовремя."""
     try:
         async with async_session() as session:
             result = await session.execute(
@@ -95,7 +78,6 @@ async def auto_cancel_job():
                     continue
                 elapsed = (now - o.wait_started_at).total_seconds() / 60
 
-                # Дневные (08:00–23:00) — 30 мин
                 if 8 <= now.hour < 23:
                     if elapsed >= config.DAY_ORDER_TIMEOUT_MINUTES:
                         await orders_service.cancel_order(
@@ -104,9 +86,8 @@ async def auto_cancel_job():
                             cancelled_by="auto",
                             refund=True,
                         )
-                        log.info(f"Автоотмена заказа #{o.id} (дневной)")
+                        log.info(f"Автоотмена заказа #{o.id}")
 
-                        # Уведомляем клиента
                         c_r = await session.execute(select(Client).where(Client.id == o.client_id))
                         client = c_r.scalar_one_or_none()
                         if client and client.tg_id:
@@ -124,16 +105,14 @@ async def auto_cancel_job():
 
 
 # ═══════════════════════════════════════════
-#   НАПОМИНАНИЯ О СОБЫТИЯХ (каждый день в 10:00)
+#   НАПОМИНАНИЯ О СОБЫТИЯХ (10:00)
 # ═══════════════════════════════════════════
 async def events_reminder_job():
-    """Напоминает клиентам о событиях за 3 дня и за 1 день."""
     log.info("📅 Проверка событий")
     try:
         async with async_session() as session:
             today = date.today()
 
-            # За 3 дня
             target_3 = today + timedelta(days=3)
             result = await session.execute(
                 select(ClientEvent).where(
@@ -157,7 +136,6 @@ async def events_reminder_job():
                     except Exception:
                         pass
 
-            # За 1 день
             target_1 = today + timedelta(days=1)
             result = await session.execute(
                 select(ClientEvent).where(
@@ -188,7 +166,6 @@ async def events_reminder_job():
 #   НАПОМИНАНИЕ О ФОТО (каждые 15 минут)
 # ═══════════════════════════════════════════
 async def photo_reminder_job():
-    """Напоминает курьерам прислать фото вручения."""
     try:
         async with async_session() as session:
             result = await session.execute(
@@ -200,7 +177,6 @@ async def photo_reminder_job():
             )
             orders = result.scalars().all()
 
-            now = datetime.now()
             for o in orders:
                 if not o.courier_id:
                     continue
@@ -224,19 +200,10 @@ async def photo_reminder_job():
 # ═══════════════════════════════════════════
 def setup_scheduler():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-
-    # Бонусы в 23:59
     scheduler.add_job(daily_bonus_job, "cron", hour=23, minute=59)
-
-    # Автоотмена каждые 5 минут
     scheduler.add_job(auto_cancel_job, "interval", minutes=5)
-
-    # События в 10:00
     scheduler.add_job(events_reminder_job, "cron", hour=10, minute=0)
-
-    # Напоминание о фото каждые 15 минут
     scheduler.add_job(photo_reminder_job, "interval", minutes=15)
-
     scheduler.start()
     log.info("⏰ Планировщик запущен")
 
@@ -244,7 +211,7 @@ def setup_scheduler():
 # ═══════════════════════════════════════════
 #   ЗАПУСК
 # ═══════════════════════════════════════════
-async def run_bot(bot: Bot, dp: Dispatcher, name: str):
+async def run_bot(bot, dp, name: str):
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         log.info(f"🚀 {name} запущен")
