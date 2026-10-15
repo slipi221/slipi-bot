@@ -250,8 +250,7 @@ def track_order(order_id: int, status: str, courier_phone: str = None,
         rows.append([btn_url("📞 Позвонить курьеру", f"tel:{courier_phone}")])
         rows.append([btn("💬 Написать курьеру", f"chat_courier_{order_id}")])
 
-    # Отмена — только пока магазин не подтвердил
-    if status in ("pending",):
+    if status == "pending":
         rows.append([btn("❌ Отменить заказ", f"track_cancel_{order_id}")])
 
     if status in ("pending", "wait"):
@@ -319,7 +318,6 @@ def favorites_list(items: list):
 def events_menu():
     return kb([
         [btn("➕ Добавить событие", "event_add")],
-        [btn("🗑 Удалить", "event_remove_menu")],
         [btn("🔙 Назад", "client_main")],
     ])
 
@@ -344,14 +342,6 @@ def event_type():
         [btn("✏️ Другое", "event_type_custom")],
         [btn("❌ Отмена", "client_main")],
     ])
-
-
-def event_remove_list(events: list):
-    rows = []
-    for e_id, title in events:
-        rows.append([btn(f"🗑 {title[:30]}", f"event_del_{e_id}")])
-    rows.append([btn("🔙 Назад", "client_events")])
-    return kb(rows)
 
 
 # ═══════════════════════════════════════════
@@ -381,7 +371,6 @@ def shop_products_menu():
 def shop_categories_menu():
     return kb([
         [btn("➕ Добавить категорию", "shop_cat_add")],
-        [btn("➖ Убрать категорию", "shop_cat_remove")],
         [btn("🔙 Назад", "shop_main")],
     ])
 
@@ -417,8 +406,6 @@ def shop_reject_reasons(order_id: int):
 def shop_stats_menu():
     return kb([
         [btn("📥 Запросить выплату", "shop_request_payout")],
-        [btn("📅 За неделю", "shop_stats_week")],
-        [btn("📅 За месяц", "shop_stats_month")],
         [btn("🔙 Назад", "shop_main")],
     ])
 
@@ -434,17 +421,6 @@ def shop_settings_menu():
     ])
 
 
-def shop_product_manage(product_id: int, is_active: bool = True):
-    toggle = "⏸ Скрыть" if is_active else "▶️ Показать"
-    return kb([
-        [btn("✏️ Изменить цену", f"shop_edit_price_{product_id}")],
-        [btn("📸 Изменить фото", f"shop_edit_photo_{product_id}")],
-        [btn(toggle, f"shop_toggle_{product_id}")],
-        [btn("🗑 Удалить", f"shop_delete_{product_id}")],
-        [btn("🔙 Назад", "shop_my_products")],
-    ])
-
-
 # ═══════════════════════════════════════════
 #   КУРЬЕР
 # ═══════════════════════════════════════════
@@ -454,8 +430,7 @@ def courier_main_on_shift():
         [btn("🚗 Мои активные", "courier_my_orders")],
         [btn("💰 Баланс и вывод", "courier_balance"),
          btn("📊 Статистика", "courier_stats")],
-        [btn("🎁 Рефералка", "courier_referral"),
-         btn("📅 Мои смены", "courier_shifts")],
+        [btn("🎁 Рефералка", "courier_referral")],
         [btn("🏆 Достижения", "courier_achievements")],
         [btn("🔴 Уйти со смены", "courier_off_shift")],
     ])
@@ -466,58 +441,13 @@ def courier_main_off_shift():
         [btn("🟢 Выйти на смену", "courier_on_shift")],
         [btn("💰 Баланс и вывод", "courier_balance"),
          btn("📊 Статистика", "courier_stats")],
-        [btn("🎁 Рефералка", "courier_referral"),
-         btn("📅 Мои смены", "courier_shifts")],
+        [btn("🎁 Рефералка", "courier_referral")],
         [btn("🏆 Достижения", "courier_achievements")],
     ])
 
 
 def courier_back(to: str = "courier_menu"):
     return kb([[btn("🔙 Назад", to)]])
-
-
-def courier_free_orders_list(orders: list, page: int = 0):
-    rows = []
-    for o in orders:
-        emoji = "🔥" if o["wait_min"] < 5 else ("🟢" if o["wait_min"] < 10 else "🟡")
-        rows.append([btn(
-            f"{emoji} #{o['id']} — {o['fee']}₽ — {o['distance']}км",
-            f"courier_order_{o['id']}"
-        )])
-    nav = []
-    if page > 0:
-        nav.append(btn("⬅️", f"courier_page_{page - 1}"))
-    nav.append(btn("🔄", "courier_free_orders"))
-    if len(orders) == 3:
-        nav.append(btn("➡️", f"courier_page_{page + 1}"))
-    if nav:
-        rows.append(nav)
-    rows.append([btn("🔙 В меню", "courier_menu")])
-    return kb(rows)
-
-
-def courier_order_view(order_id: int):
-    return kb([
-        [btn("🤝 Взять заказ", f"courier_take_{order_id}")],
-        [btn("🔄 Обновить", "courier_free_orders")],
-        [btn("🔙 Назад", "courier_menu")],
-    ])
-
-
-def courier_active_order(order_id: int, status: str):
-    rows = []
-    if status == "going":
-        rows.append([btn("📦 Забрал", f"courier_picked_{order_id}")])
-    elif status == "picked":
-        rows.append([btn("🏠 У клиента", f"courier_at_client_{order_id}")])
-    elif status == "at_client":
-        rows.append([btn("✅ Доставлено", f"courier_done_{order_id}")])
-    rows.append([btn("🗺 Маршрут", f"courier_map_{order_id}")])
-    rows.append([btn("📞 Позвонить клиенту", f"courier_call_{order_id}")])
-    rows.append([btn("💬 Написать клиенту", f"courier_chat_{order_id}")])
-    rows.append([btn("🆘 Проблема", f"courier_problem_{order_id}")])
-    rows.append([btn("🔙 Назад", "courier_my_orders")])
-    return kb(rows)
 
 
 def courier_balance_menu():
@@ -530,8 +460,6 @@ def courier_balance_menu():
 
 def courier_stats_menu():
     return kb([
-        [btn("📅 За неделю", "courier_stats_week")],
-        [btn("📅 За месяц", "courier_stats_month")],
         [btn("🏆 Достижения", "courier_achievements")],
         [btn("🔙 Назад", "courier_menu")],
     ])
@@ -545,16 +473,8 @@ def courier_referral_menu(ref_link: str):
     ])
 
 
-def courier_shifts_menu():
-    return kb([
-        [btn("📅 Записаться на смену", "courier_book_shift")],
-        [btn("📋 Мои смены", "courier_my_shifts")],
-        [btn("🔙 Назад", "courier_menu")],
-    ])
-
-
 # ═══════════════════════════════════════════
-#   АДМИН
+#   АДМИН — ГЛАВНОЕ
 # ═══════════════════════════════════════════
 def admin_main():
     return kb([
@@ -581,11 +501,13 @@ def admin_cancel():
     return kb([[btn("❌ Отмена", "admin_main")]])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — ЗАЯВКИ
+# ═══════════════════════════════════════════
 def admin_requests_menu():
     return kb([
         [btn("🏪 Магазины", "admin_req_shops")],
         [btn("🚴 Курьеры", "admin_req_couriers")],
-        [btn("💸 Выплаты", "admin_req_payouts")],
         [btn("🔙 Назад", "admin_main")],
     ])
 
@@ -604,108 +526,21 @@ def admin_approve_courier(courier_id: int):
     ])
 
 
-def admin_payments_menu():
-    return kb([
-        [btn("📥 Входящие", "admin_pay_incoming")],
-        [btn("📤 Выплаты", "admin_pay_outgoing")],
-        [btn("📜 История", "admin_pay_history")],
-        [btn("⚡ Быстрое подтверждение", "admin_pay_fast")],
-        [btn("💸 Возвраты", "admin_pay_refunds")],
-        [btn("🔙 Назад", "admin_main")],
-    ])
-
-
-def admin_confirm_payment(order_id: int):
-    return kb([
-        [btn("✅ Подтвердить", f"admin_pay_ok_{order_id}")],
-        [btn("❌ Отклонить", f"admin_pay_no_{order_id}")],
-    ])
-
-
-def admin_payout_actions(payout_id: int):
-    return kb([
-        [btn("💳 Перевести", f"admin_payout_transfer_{payout_id}")],
-        [btn("✅ Подтвердить", f"admin_payout_ok_{payout_id}")],
-        [btn("❌ Отклонить", f"admin_payout_no_{payout_id}")],
-        [btn("🔙 Назад", "admin_payments")],
-    ])
-
-
-def admin_settings_menu():
-    return kb([
-        [btn("✏️ Комиссия", "admin_set_commission")],
-        [btn("✏️ Мин. вывод курьера", "admin_set_min_withdraw")],
-        [btn("✏️ Бонус за 10 заказов", "admin_set_bonus")],
-        [btn("✏️ Часы работы", "admin_set_hours")],
-        [btn("🌍 Мультигород", "admin_multicity")],
-        [btn("🔙 Назад", "admin_main")],
-    ])
-
-
-def admin_stuck_order(order_id: int):
-    return kb([
-        [btn("💰 Поднять ставку", f"admin_boost_{order_id}")],
-        [btn("❌ Отменить заказ", f"admin_cancel_order_{order_id}")],
-        [btn("🔙 Назад", "admin_stuck_orders")],
-    ])
-
-
-def admin_boost_amount(order_id: int):
-    return kb([
-        [btn("+50 ₽", f"admin_boost_set_{order_id}_50")],
-        [btn("+100 ₽", f"admin_boost_set_{order_id}_100")],
-        [btn("+200 ₽", f"admin_boost_set_{order_id}_200")],
-        [btn("✏️ Своя сумма", f"admin_boost_custom_{order_id}")],
-        [btn("🔙 Назад", "admin_stuck_orders")],
-    ])
-
-
-def admin_broadcast_menu():
-    return kb([
-        [btn("👥 Клиентам", "admin_bc_clients")],
-        [btn("🚴 Курьерам", "admin_bc_couriers")],
-        [btn("🏪 Магазинам", "admin_bc_shops")],
-        [btn("🔙 Назад", "admin_main")],
-    ])
-
-
-def admin_promo_list(promos: list):
-    rows = [[btn("➕ Создать промокод", "admin_promo_create")]]
-    for p in promos[:8]:
-        status = "✅" if p["is_active"] else "⏸"
-        rows.append([btn(f"{status} {p['code']} — {p['discount_text']}",
-                         f"admin_promo_view_{p['id']}")])
-    rows.append([btn("🔙 Назад", "admin_main")])
-    return kb(rows)
-
-
-def admin_promo_view(promo_id: int):
-    return kb([
-        [btn("🗑 Удалить", f"admin_promo_del_{promo_id}")],
-        [btn("🔙 Назад", "admin_promos")],
-    ])
-
-
-def admin_promo_type():
-    return kb([
-        [btn("💯 Процент", "promo_type_percent")],
-        [btn("💵 Фиксированная", "promo_type_fixed")],
-        [btn("❌ Отмена", "admin_main")],
-    ])
-    # ═══════════════════════════════════════════
+# ═══════════════════════════════════════════
 #   АДМИН — МАГАЗИНЫ
 # ═══════════════════════════════════════════
 def admin_shops_list(shops: list, page: int = 0):
     rows = []
-    for i, s in enumerate(shops, start=1):
+    for s in shops:
         status = "🟢" if s["status"] == "active" else ("🟡" if s["status"] == "pending" else "🔴")
         rows.append([btn(f"{status} {s['name']}", f"admin_shop_view_{s['id']}")])
 
     nav = []
     if page > 0:
-        nav.append(btn("⬅️ Пред", f"admin_shops_page_{page - 1}"))
+        nav.append(btn("⬅️", f"admin_shops_page_{page - 1}"))
+    nav.append(btn("🔄", "admin_shops"))
     if len(shops) == 10:
-        nav.append(btn("След ➡️", f"admin_shops_page_{page + 1}"))
+        nav.append(btn("➡️", f"admin_shops_page_{page + 1}"))
     if nav:
         rows.append(nav)
 
@@ -724,9 +559,7 @@ def admin_shop_card(shop_id: int, status: str):
         rows.append([btn("❌ Отклонить", f"admin_shop_no_{shop_id}")])
 
     rows.append([btn("📊 Статистика", f"admin_shop_stats_{shop_id}")])
-    rows.append([btn("💸 Выплатить", f"admin_shop_payout_{shop_id}")])
     rows.append([btn("✉️ Написать", f"admin_shop_msg_{shop_id}")])
-    rows.append([btn("🗑 Удалить", f"admin_shop_delete_{shop_id}")])
     rows.append([btn("🔙 Назад", "admin_shops")])
     return kb(rows)
 
@@ -736,17 +569,19 @@ def admin_shop_card(shop_id: int, status: str):
 # ═══════════════════════════════════════════
 def admin_couriers_list(couriers: list, page: int = 0):
     rows = []
-    for i, c in enumerate(couriers, start=1):
+    for c in couriers:
         status = "🟢" if c["status"] == "active" else ("🟡" if c["status"] == "pending" else "🔴")
-        state_map = {"on": "🟢", "off": "⚪", "break": "☕", "busy": "🚗"}
-        state = state_map.get(c["state"], "⚪")
-        rows.append([btn(f"{status}{state} {c['name']} — {c['balance']}", f"admin_cour_view_{c['id']}")])
+        rows.append([btn(
+            f"{status} {c['name']} — {c['balance']}",
+            f"admin_cour_view_{c['id']}"
+        )])
 
     nav = []
     if page > 0:
-        nav.append(btn("⬅️ Пред", f"admin_couriers_page_{page - 1}"))
+        nav.append(btn("⬅️", f"admin_couriers_page_{page - 1}"))
+    nav.append(btn("🔄", "admin_couriers"))
     if len(couriers) == 10:
-        nav.append(btn("След ➡️", f"admin_couriers_page_{page + 1}"))
+        nav.append(btn("➡️", f"admin_couriers_page_{page + 1}"))
     if nav:
         rows.append(nav)
 
@@ -765,28 +600,50 @@ def admin_courier_card(courier_id: int, status: str):
         rows.append([btn("❌ Отклонить", f"admin_cour_no_{courier_id}")])
 
     rows.append([btn("📊 Статистика", f"admin_cour_stats_{courier_id}")])
-    rows.append([btn("💸 Выплатить", f"admin_cour_payout_{courier_id}")])
     rows.append([btn("✉️ Написать", f"admin_cour_msg_{courier_id}")])
-    rows.append([btn("🗑 Удалить", f"admin_cour_delete_{courier_id}")])
     rows.append([btn("🔙 Назад", "admin_couriers")])
     return kb(rows)
 
 
 # ═══════════════════════════════════════════
-#   АДМИН — ИСТОРИЯ ПЕРЕВОДОВ
+#   АДМИН — ПЕРЕВОДЫ
 # ═══════════════════════════════════════════
-def admin_pay_history_menu():
+def admin_payments_menu():
     return kb([
-        [btn("📥 Входящие", "admin_hist_in")],
-        [btn("📤 Исходящие", "admin_hist_out")],
-        [btn("📊 Экспорт CSV", "admin_hist_csv")],
+        [btn("📥 Входящие", "admin_pay_incoming")],
+        [btn("📤 Выплаты", "admin_pay_outgoing")],
+        [btn("📜 История", "admin_pay_history")],
+        [btn("⚡ Быстрое подтверждение", "admin_pay_fast")],
+        [btn("💸 Возвраты", "admin_pay_refunds")],
+        [btn("🔙 Назад", "admin_main")],
+    ])
+
+
+def admin_confirm_payment(order_id: int):
+    return kb([
+        [btn("✅ Подтвердить", f"admin_pay_ok_{order_id}")],
+        [btn("❌ Отклонить", f"admin_pay_no_{order_id}")],
         [btn("🔙 Назад", "admin_payments")],
     ])
 
 
-# ═══════════════════════════════════════════
-#   АДМИН — ВОЗВРАТЫ
-# ═══════════════════════════════════════════
+def admin_payout_actions(payout_id: int):
+    return kb([
+        [btn("💳 Перевести", f"admin_payout_transfer_{payout_id}")],
+        [btn("✅ Подтвердить", f"admin_payout_ok_{payout_id}")],
+        [btn("❌ Отклонить", f"admin_payout_no_{payout_id}")],
+        [btn("🔙 Назад", "admin_payments")],
+    ])
+
+
+def admin_pay_history_menu():
+    return kb([
+        [btn("📥 Входящие", "admin_hist_in")],
+        [btn("📤 Исходящие", "admin_hist_out")],
+        [btn("🔙 Назад", "admin_payments")],
+    ])
+
+
 def admin_refunds_list(refunds: list):
     rows = []
     for r in refunds:
@@ -807,6 +664,70 @@ def admin_refund_card(order_id: int):
     ])
 
 
+def admin_fast_confirm_menu(orders: list, selected: list):
+    rows = []
+    for o in orders:
+        mark = "☑️" if o["id"] in selected else "☐"
+        rows.append([btn(
+            f"{mark} #{o['id']} — {o['amount']}",
+            f"admin_fast_toggle_{o['id']}"
+        )])
+    rows.append([btn("✅ Подтвердить выбранные", "admin_fast_apply")])
+    rows.append([btn("❌ Отмена", "admin_payments")])
+    return kb(rows)
+
+
+# ═══════════════════════════════════════════
+#   АДМИН — ЗАВИСШИЕ ЗАКАЗЫ
+# ═══════════════════════════════════════════
+def admin_stuck_order(order_id: int):
+    return kb([
+        [btn("💰 Поднять ставку", f"admin_boost_{order_id}")],
+        [btn("❌ Отменить заказ", f"admin_cancel_order_{order_id}")],
+        [btn("🔙 Назад", "admin_stuck_orders")],
+    ])
+
+
+def admin_boost_amount(order_id: int):
+    return kb([
+        [btn("+50 ₽", f"admin_boost_set_{order_id}_50")],
+        [btn("+100 ₽", f"admin_boost_set_{order_id}_100")],
+        [btn("+200 ₽", f"admin_boost_set_{order_id}_200")],
+        [btn("✏️ Своя сумма", f"admin_boost_custom_{order_id}")],
+        [btn("🔙 Назад", "admin_stuck_orders")],
+    ])
+
+
+# ═══════════════════════════════════════════
+#   АДМИН — ПРОМОКОДЫ
+# ═══════════════════════════════════════════
+def admin_promo_list(promos: list):
+    rows = [[btn("➕ Создать промокод", "admin_promo_create")]]
+    for p in promos[:8]:
+        status = "✅" if p["is_active"] else "⏸"
+        rows.append([btn(
+            f"{status} {p['code']} — {p['discount_text']}",
+            f"admin_promo_view_{p['id']}"
+        )])
+    rows.append([btn("🔙 Назад", "admin_main")])
+    return kb(rows)
+
+
+def admin_promo_view(promo_id: int):
+    return kb([
+        [btn("🗑 Удалить", f"admin_promo_del_{promo_id}")],
+        [btn("🔙 Назад", "admin_promos")],
+    ])
+
+
+def admin_promo_type():
+    return kb([
+        [btn("💯 Процент", "promo_type_percent")],
+        [btn("💵 Фиксированная", "promo_type_fixed")],
+        [btn("❌ Отмена", "admin_main")],
+    ])
+
+
 # ═══════════════════════════════════════════
 #   АДМИН — ЖАЛОБЫ
 # ═══════════════════════════════════════════
@@ -824,7 +745,6 @@ def admin_complaints_list(complaints: list):
 def admin_complaint_card(order_id: int):
     return kb([
         [btn("💰 Вернуть полностью", f"admin_comp_full_{order_id}")],
-        [btn("💸 Частично", f"admin_comp_part_{order_id}")],
         [btn("❌ Отклонить", f"admin_comp_reject_{order_id}")],
         [btn("📊 Детали заказа", f"admin_comp_details_{order_id}")],
         [btn("🔙 Назад", "admin_complaints")],
@@ -832,12 +752,20 @@ def admin_complaint_card(order_id: int):
 
 
 # ═══════════════════════════════════════════
-#   АДМИН — РАССЫЛКИ
+#   АДМИН — РАССЫЛКА
 # ═══════════════════════════════════════════
+def admin_broadcast_menu():
+    return kb([
+        [btn("👥 Клиентам", "admin_bc_clients")],
+        [btn("🚴 Курьерам", "admin_bc_couriers")],
+        [btn("🏪 Магазинам", "admin_bc_shops")],
+        [btn("🔙 Назад", "admin_main")],
+    ])
+
+
 def admin_broadcast_confirm():
     return kb([
         [btn("✅ Отправить", "admin_bc_send")],
-        [btn("✏️ Изменить", "admin_broadcast")],
         [btn("❌ Отмена", "admin_main")],
     ])
 
@@ -852,7 +780,16 @@ def admin_analytics_menu():
         [btn("📅 За всё время", "admin_analytics_all")],
         [btn("🏆 Топ-магазины", "admin_top_shops")],
         [btn("🏆 Топ-курьеры", "admin_top_couriers")],
-        [btn("📊 Экспорт CSV", "admin_export_csv")],
+        [btn("🔙 Назад", "admin_main")],
+    ])
+
+
+# ═══════════════════════════════════════════
+#   АДМИН — НАСТРОЙКИ
+# ═══════════════════════════════════════════
+def admin_settings_menu():
+    return kb([
+        [btn("🌍 Мультигород", "admin_multicity")],
         [btn("🔙 Назад", "admin_main")],
     ])
 
