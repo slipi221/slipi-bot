@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — подключение к базе данных PostgreSQL
+SLIPI — подключение к базе данных SQLite
 """
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
     AsyncSession,
@@ -19,9 +20,6 @@ class Base(DeclarativeBase):
 engine = create_async_engine(
     config.DATABASE_URL,
     echo=False,
-    pool_pre_ping=True,
-    pool_size=10,
-    max_overflow=20,
 )
 
 
@@ -33,8 +31,10 @@ async_session = async_sessionmaker(
 
 
 async def init_db():
-    """Создаёт все таблицы в БД."""
+    """Создаёт все таблицы + включает WAL-режим."""
     async with engine.begin() as conn:
+        await conn.execute(text("PRAGMA journal_mode=WAL"))
+        await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.run_sync(Base.metadata.create_all)
 
 
