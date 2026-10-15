@@ -24,18 +24,17 @@ class OrderFSM(StatesGroup):
 
 
 class ClientFSM(StatesGroup):
-    promo_input      = State()
-    review_comment   = State()
-    withdraw_amount  = State()
-    withdraw_card    = State()
-    event_whom       = State()
-    event_title      = State()
-    event_date       = State()
-    event_type       = State()
-    support_msg      = State()
-    chat_message     = State()
-    address_manage   = State()
-    address_add      = State()
+    promo_input       = State()
+    review_comment    = State()
+    withdraw_amount   = State()
+    withdraw_card     = State()
+    event_whom        = State()
+    event_date        = State()
+    event_type        = State()
+    support_msg       = State()
+    chat_message      = State()
+    address_manage    = State()
+    address_add       = State()
     address_add_title = State()
 
 
@@ -50,6 +49,7 @@ class ShopReg(StatesGroup):
     vk           = State()
     owner_name   = State()
     geo          = State()
+    categories   = State()
 
 
 class ShopProduct(StatesGroup):
@@ -68,7 +68,8 @@ class ShopEdit(StatesGroup):
     phone        = State()
     geo          = State()
     payout       = State()
-    chat_message = State()
+    open_time    = State()
+    close_time   = State()
 
 
 # ═══════════════════════════════════════════
