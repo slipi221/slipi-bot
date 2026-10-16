@@ -18,7 +18,8 @@ from states import AdminFSM
 from database import async_session
 from models import (
     Shop, Courier, Order, Payment, Payout, Client,
-    Promo, Log, DeliveryOrder, DeliveryPayment,
+    Promo, Log, DeliveryOrder, DeliveryPayment, Complaint,
+    Admin, BotUpdate,
 )
 from services import orders as orders_service
 from services import payments as payments_service
@@ -29,8 +30,28 @@ from bots import bot_client, bot_shop, bot_courier, bot_admin
 router = Router(name="admin")
 
 
-def is_admin(tg_id: int) -> bool:
-    return tg_id == config.ADMIN_ID
+# ═══════════════════════════════════════════
+#   ПРАВА АДМИНОВ
+# ═══════════════════════════════════════════
+async def get_admin_permissions(session, tg_id: int):
+    """None = полный доступ. False = не админ. Dict = права."""
+    if tg_id == config.ADMIN_ID:
+        return None
+
+    r = await session.execute(select(Admin).where(Admin.tg_id == tg_id, Admin.is_active == True))
+    admin = r.scalar_one_or_none()
+    if not admin:
+        return False
+
+    return helpers.parse_permissions(admin.permissions)
+
+
+def has_perm(permissions, key: str) -> bool:
+    if permissions is None:
+        return True
+    if permissions is False:
+        return False
+    return permissions.get(key, False)
 
 
 async def log_action(text: str):
@@ -48,13 +69,17 @@ async def log_action(text: str):
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    if not is_admin(message.from_user.id):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, message.from_user.id)
+
+    if perms is False:
         await message.answer("🚫 Доступ запрещён.")
         return
-    await show_dashboard(message, edit=False)
+
+    await show_dashboard(message, perms, edit=False)
 
 
-async def show_dashboard(message: Message, edit: bool = False):
+async def show_dashboard(message: Message, perms, edit: bool = False):
     async with async_session() as session:
         summary = await payments_service.get_finance_summary(session)
 
@@ -81,28 +106,31 @@ async def show_dashboard(message: Message, edit: bool = False):
         f"👑 <b>Админ-панель {config.SERVICE_NAME}</b>\n\n"
         f"📨 Заявок: {total_pending}\n"
         f"🚗 В работе: {in_work}\n"
-        f"💳 Ожидают оплаты (заказы): {payments_count}\n"
-        f"🚚 Ожидают оплаты (доставки): {del_payments_count}\n"
-        f"💸 Заявок на выплату: {payouts_count}\n"
-        f"💰 Доход платформы: {helpers.money(summary['platform_income'])}"
+        f"💳 Ожидают оплаты: {payments_count}\n"
+        f"🚚 Доставки: {del_payments_count}\n"
+        f"💸 Выплаты: {payouts_count}\n"
+        f"💰 Доход: {helpers.money(summary['platform_income'])}"
     )
 
+    markup = kb.admin_main(perms)
     if edit:
         try:
-            await message.edit_text(text, reply_markup=kb.admin_main())
+            await message.edit_text(text, reply_markup=markup)
         except Exception:
-            await message.answer(text, reply_markup=kb.admin_main())
+            await message.answer(text, reply_markup=markup)
     else:
-        await message.answer(text, reply_markup=kb.admin_main())
+        await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "admin_main")
 async def back_main(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    if not is_admin(call.from_user.id):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if perms is False:
         await call.answer("Нет доступа", show_alert=True)
         return
-    await show_dashboard(call.message, edit=True)
+    await show_dashboard(call.message, perms, edit=True)
     await call.answer()
 
 
@@ -111,7 +139,9 @@ async def back_main(call: CallbackQuery, state: FSMContext):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_requests")
 async def requests_menu(call: CallbackQuery):
-    if not is_admin(call.from_user.id):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if not has_perm(perms, "requests"):
         await call.answer("Нет доступа", show_alert=True)
         return
     await call.message.edit_text("📨 <b>Заявки</b>", reply_markup=kb.admin_requests_menu())
@@ -133,10 +163,7 @@ async def req_shops(call: CallbackQuery):
     for s in shops[:10]:
         text = (
             f"🏪 <b>Новый магазин</b>\n\n"
-            f"📛 {s.name}\n"
-            f"📍 {s.address or '—'}\n"
-            f"📞 {s.phone or '—'}\n"
-            f"👤 {s.owner_name or '—'}"
+            f"📛 {s.name}\n📍 {s.address or '—'}\n📞 {s.phone or '—'}"
         )
         await call.message.answer(text, reply_markup=kb.admin_approve_shop(s.id))
     await call.answer()
@@ -153,7 +180,8 @@ async def shop_ok(call: CallbackQuery):
             await session.commit()
             if shop.tg_id:
                 try:
-                    await bot_shop.send_message(shop.tg_id, "✅ Ваш магазин одобрен! Отправьте /start")
+                    await bot_shop.send_message(shop.tg_id,
+                        "✅ <b>Ваш магазин одобрен!</b>\n\nОтправьте /start")
                 except Exception:
                     pass
     await log_action(f"Магазин #{shop_id} одобрен")
@@ -195,10 +223,7 @@ async def req_couriers(call: CallbackQuery):
     for c in couriers[:10]:
         text = (
             f"🚴 <b>Новый курьер</b>\n\n"
-            f"👤 {c.name}\n"
-            f"📞 {c.phone or '—'}\n"
-            f"🏙 {c.city or '—'}\n"
-            f"🚗 {c.transport or '—'}"
+            f"👤 {c.name}\n📞 {c.phone or '—'}\n🏙 {c.city or '—'}\n🚗 {c.transport or '—'}"
         )
         await call.message.answer(text, reply_markup=kb.admin_approve_courier(c.id))
     await call.answer()
@@ -249,7 +274,9 @@ async def cour_no(call: CallbackQuery):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_shops")
 async def admin_shops(call: CallbackQuery):
-    if not is_admin(call.from_user.id):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if not has_perm(perms, "shops"):
         await call.answer("Нет доступа", show_alert=True)
         return
     await admin_shops_page(call, 0)
@@ -290,14 +317,10 @@ async def admin_shop_view(call: CallbackQuery):
         done_orders = orders_r.scalars().all()
         turnover = sum(float(o.total_price) for o in done_orders)
 
-    status_map = {"active": "🟢 Активен", "pending": "🟡 На модерации", "blocked": "🔴 Заблокирован"}
-
+    status_map = {"active": "🟢", "pending": "🟡", "blocked": "🔴"}
     text = (
-        f"🏪 <b>{shop.name}</b>\n"
-        f"{status_map.get(shop.status, shop.status)}\n\n"
-        f"👤 Владелец: {shop.owner_name or '—'}\n"
-        f"📞 {shop.phone or '—'}\n"
-        f"📍 {shop.address or '—'}\n"
+        f"🏪 <b>{shop.name}</b> {status_map.get(shop.status, '')}\n\n"
+        f"👤 {shop.owner_name or '—'}\n📞 {shop.phone or '—'}\n📍 {shop.address or '—'}\n"
         f"⭐ {float(shop.rating or 0):.1f} ({shop.reviews_count})\n\n"
         f"📦 Заказов: {len(done_orders)}\n"
         f"💰 Оборот: {helpers.money(turnover)}\n"
@@ -320,8 +343,7 @@ async def admin_shop_block(call: CallbackQuery):
                 try:
                     await bot_shop.send_message(
                         shop.tg_id,
-                        f"🚫 <b>Магазин заблокирован.</b>\n\n"
-                        f"Обратитесь в поддержку: {config.SUPPORT_TG}"
+                        f"🚫 <b>Магазин заблокирован.</b>\n\nПоддержка: {config.SUPPORT_TG}"
                     )
                 except Exception:
                     pass
@@ -365,10 +387,8 @@ async def admin_shop_stats(call: CallbackQuery):
 
     text = (
         f"📊 <b>Статистика магазина</b>\n\n"
-        f"📦 Всего: {len(orders)}\n"
-        f"✅ Доставлено: {done}\n"
-        f"❌ Отменено: {cancel}\n"
-        f"⏳ В работе: {wait}\n\n"
+        f"📦 Всего: {len(orders)}\n✅ Доставлено: {done}\n"
+        f"❌ Отменено: {cancel}\n⏳ В работе: {wait}\n\n"
         f"💰 Оборот: {helpers.money(total_sum)}"
     )
     await call.message.edit_text(text, reply_markup=kb.admin_back(f"admin_shop_view_{shop_id}"))
@@ -380,22 +400,17 @@ async def admin_shop_msg(call: CallbackQuery, state: FSMContext):
     shop_id = int(call.data.split("_")[3])
     await state.update_data(msg_target_type="shop", msg_target_id=shop_id)
     await state.set_state(AdminFSM.reply_to_client)
-    await call.message.edit_text(
-        "✉️ Введите сообщение для магазина:",
-        reply_markup=kb.admin_cancel()
-    )
+    await call.message.edit_text("✉️ Введите сообщение:", reply_markup=kb.admin_cancel())
     await call.answer()
 
 
-# Пополнение баланса магазина
 @router.callback_query(F.data.startswith("admin_shop_topup_"))
 async def shop_topup_start(call: CallbackQuery, state: FSMContext):
     shop_id = int(call.data.split("_")[3])
     await state.update_data(topup_shop_id=shop_id)
     await state.set_state(AdminFSM.topup_amount)
     await call.message.edit_text(
-        "💰 <b>Пополнение баланса магазина</b>\n\n"
-        "Введите сумму, которую нужно зачислить:",
+        "💰 <b>Пополнение баланса магазина</b>\n\nВведите сумму:",
         reply_markup=kb.admin_cancel()
     )
     await call.answer()
@@ -418,29 +433,104 @@ async def shop_topup_apply(message: Message, state: FSMContext):
         r = await session.execute(select(Shop).where(Shop.id == shop_id))
         shop = r.scalar_one_or_none()
         if not shop:
-            await message.answer("❌ Магазин не найден.")
+            await message.answer("❌ Не найден.")
             await state.clear()
             return
 
-        shop.balance = shop.balance + amount
-        await session.commit()
+        await payments_service.topup_shop_balance(session, shop_id, amount)
 
         if shop.tg_id:
             try:
                 await bot_shop.send_message(
                     shop.tg_id,
-                    f"💰 <b>Баланс пополнен на {helpers.money(amount)}</b>\n\n"
-                    f"Текущий баланс: {helpers.money(shop.balance)}"
+                    f"💰 Баланс пополнен на {helpers.money(amount)}"
                 )
             except Exception:
                 pass
 
     await log_action(f"Магазин #{shop_id} пополнен на {amount} ₽")
     await state.clear()
-    await message.answer(
-        f"✅ Баланс магазина пополнен на {helpers.money(amount)}.",
-        reply_markup=kb.admin_main()
+    await message.answer(f"✅ Баланс пополнен.", reply_markup=kb.admin_main())
+
+
+@router.callback_query(F.data.startswith("admin_shop_edit_"))
+async def admin_shop_edit(call: CallbackQuery):
+    shop_id = int(call.data.split("_")[3])
+    await call.message.edit_text(
+        "✏️ <b>Что изменить?</b>",
+        reply_markup=kb.admin_shop_edit_menu(shop_id)
     )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ase_"))
+async def ase_field_start(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    field = parts[1]
+    shop_id = int(parts[2])
+
+    field_names = {"name": "название", "address": "адрес", "phone": "телефон", "geo": "гео"}
+    await state.update_data(ase_shop_id=shop_id, ase_field=field)
+    await state.set_state(AdminFSM.ase_field)
+
+    if field == "geo":
+        await call.message.edit_text(
+            "📍 Отправьте геолокацию:",
+            reply_markup=kb.admin_cancel()
+        )
+    else:
+        await call.message.edit_text(
+            f"✏️ Введите {field_names.get(field, field)}:",
+            reply_markup=kb.admin_cancel()
+        )
+    await call.answer()
+
+
+@router.message(AdminFSM.ase_field, F.location)
+async def ase_field_geo_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    shop_id = data.get("ase_shop_id")
+    if data.get("ase_field") != "geo":
+        return
+    async with async_session() as session:
+        r = await session.execute(select(Shop).where(Shop.id == shop_id))
+        shop = r.scalar_one_or_none()
+        if shop:
+            shop.lat = message.location.latitude
+            shop.lon = message.location.longitude
+            await session.commit()
+    await state.clear()
+    await message.answer("✅ Гео обновлено.", reply_markup=kb.admin_main())
+
+
+@router.message(AdminFSM.ase_field)
+async def ase_field_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    shop_id = data.get("ase_shop_id")
+    field = data.get("ase_field")
+
+    field_map = {"name": "name", "address": "address", "phone": "phone"}
+    db_field = field_map.get(field)
+    if not db_field:
+        await state.clear()
+        return
+
+    value = message.text.strip()
+    if field == "phone":
+        if not helpers.is_valid_phone(value):
+            await message.answer("❌ Неверный номер.")
+            return
+        value = helpers.clean_phone(value)
+
+    async with async_session() as session:
+        r = await session.execute(select(Shop).where(Shop.id == shop_id))
+        shop = r.scalar_one_or_none()
+        if shop:
+            setattr(shop, db_field, value)
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Обновлено.", reply_markup=kb.admin_main())
 
 
 # ═══════════════════════════════════════════
@@ -448,7 +538,9 @@ async def shop_topup_apply(message: Message, state: FSMContext):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_couriers")
 async def admin_couriers(call: CallbackQuery):
-    if not is_admin(call.from_user.id):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if not has_perm(perms, "couriers"):
         await call.answer("Нет доступа", show_alert=True)
         return
     await admin_couriers_page(call, 0)
@@ -462,10 +554,8 @@ async def admin_couriers_page(call: CallbackQuery, page: int):
     start = page * 10
     page_c = all_c[start:start + 10]
     items = [{
-        "id": c.id,
-        "name": c.name,
-        "status": c.status,
-        "balance": helpers.money(c.balance),
+        "id": c.id, "name": c.name,
+        "status": c.status, "balance": helpers.money(c.balance),
     } for c in page_c]
 
     text = f"🚴 <b>Курьеры ({len(all_c)})</b>\n\nСтр. {page + 1}"
@@ -489,16 +579,13 @@ async def admin_cour_view(call: CallbackQuery):
             await call.answer("Не найден", show_alert=True)
             return
 
-    status_map = {"active": "🟢 Активен", "pending": "🟡 На модерации", "blocked": "🔴 Заблокирован"}
-    state_map = {"on": "🟢 На смене", "off": "⚪ Не на смене", "break": "☕ Перерыв", "busy": "🚗 На заказе"}
+    status_map = {"active": "🟢", "pending": "🟡", "blocked": "🔴"}
+    state_map = {"on": "🟢 На смене", "off": "⚪ Не на смене", "break": "☕", "busy": "🚗"}
 
     text = (
-        f"🚴 <b>{courier.name}</b>\n"
-        f"{status_map.get(courier.status, courier.status)}\n"
+        f"🚴 <b>{courier.name}</b> {status_map.get(courier.status, '')}\n"
         f"{state_map.get(courier.courier_state, '—')}\n\n"
-        f"📞 {courier.phone or '—'}\n"
-        f"🏙 {courier.city or '—'}\n"
-        f"🚗 {courier.transport or '—'}\n"
+        f"📞 {courier.phone or '—'}\n🏙 {courier.city or '—'}\n🚗 {courier.transport or '—'}\n"
         f"💳 {helpers.format_card(courier.card_number or '—')}\n\n"
         f"💰 Баланс: {helpers.money(courier.balance)}\n"
         f"⭐ {float(courier.rating or 0):.1f} ({courier.reviews_count})\n"
@@ -522,7 +609,7 @@ async def admin_cour_block(call: CallbackQuery):
                 try:
                     await bot_courier.send_message(
                         c.tg_id,
-                        f"🚫 <b>Доступ закрыт.</b>\n\nОбратитесь в поддержку: {config.SUPPORT_TG}"
+                        f"🚫 <b>Доступ закрыт.</b>\n\nПоддержка: {config.SUPPORT_TG}"
                     )
                 except Exception:
                     pass
@@ -566,9 +653,7 @@ async def admin_cour_stats(call: CallbackQuery):
 
     text = (
         f"📊 <b>Статистика курьера</b>\n\n"
-        f"📦 Всего: {len(orders)}\n"
-        f"✅ Доставлено: {done}\n"
-        f"❌ Отменено: {cancel}\n\n"
+        f"📦 Всего: {len(orders)}\n✅ Доставлено: {done}\n❌ Отменено: {cancel}\n\n"
         f"💰 Заработал: {helpers.money(earned)}"
     )
     await call.message.edit_text(text, reply_markup=kb.admin_back(f"admin_cour_view_{courier_id}"))
@@ -580,11 +665,119 @@ async def admin_cour_msg(call: CallbackQuery, state: FSMContext):
     courier_id = int(call.data.split("_")[3])
     await state.update_data(msg_target_type="courier", msg_target_id=courier_id)
     await state.set_state(AdminFSM.reply_to_client)
+    await call.message.edit_text("✉️ Введите сообщение:", reply_markup=kb.admin_cancel())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("admin_cour_topup_"))
+async def cour_topup_start(call: CallbackQuery, state: FSMContext):
+    courier_id = int(call.data.split("_")[3])
+    await state.update_data(topup_cour_id=courier_id)
+    await state.set_state(AdminFSM.topup_amount)
     await call.message.edit_text(
-        "✉️ Введите сообщение для курьера:",
+        "💰 <b>Пополнение баланса курьера</b>\n\nВведите сумму:",
         reply_markup=kb.admin_cancel()
     )
     await call.answer()
+
+
+@router.message(AdminFSM.topup_amount)
+async def cour_topup_apply(message: Message, state: FSMContext):
+    # Если это не магазин — обрабатываем курьера
+    data = await state.get_data()
+    if data.get("topup_shop_id"):
+        return  # уже обработано выше
+
+    courier_id = data.get("topup_cour_id")
+    if not courier_id:
+        return
+
+    try:
+        amount = Decimal(message.text.replace(",", ".").strip())
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите число больше 0.")
+        return
+
+    async with async_session() as session:
+        r = await session.execute(select(Courier).where(Courier.id == courier_id))
+        c = r.scalar_one_or_none()
+        if not c:
+            await message.answer("❌ Не найден.")
+            await state.clear()
+            return
+
+        await payments_service.topup_courier_balance(session, courier_id, amount)
+
+        if c.tg_id:
+            try:
+                await bot_courier.send_message(
+                    c.tg_id,
+                    f"💰 Баланс пополнен на {helpers.money(amount)}"
+                )
+            except Exception:
+                pass
+
+    await log_action(f"Курьер #{courier_id} пополнен на {amount} ₽")
+    await state.clear()
+    await message.answer("✅ Баланс пополнен.", reply_markup=kb.admin_main())
+
+
+@router.callback_query(F.data.startswith("admin_cour_edit_"))
+async def admin_cour_edit(call: CallbackQuery):
+    courier_id = int(call.data.split("_")[3])
+    await call.message.edit_text(
+        "✏️ <b>Что изменить?</b>",
+        reply_markup=kb.admin_courier_edit_menu(courier_id)
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("ace_"))
+async def ace_field_start(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    field = parts[1]
+    courier_id = int(parts[2])
+
+    field_names = {"name": "имя", "phone": "телефон", "city": "город", "transport": "транспорт"}
+    await state.update_data(ace_courier_id=courier_id, ace_field=field)
+    await state.set_state(AdminFSM.ace_field)
+    await call.message.edit_text(
+        f"✏️ Введите {field_names.get(field, field)}:",
+        reply_markup=kb.admin_cancel()
+    )
+    await call.answer()
+
+
+@router.message(AdminFSM.ace_field)
+async def ace_field_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    courier_id = data.get("ace_courier_id")
+    field = data.get("ace_field")
+
+    field_map = {"name": "name", "phone": "phone", "city": "city", "transport": "transport"}
+    db_field = field_map.get(field)
+    if not db_field:
+        await state.clear()
+        return
+
+    value = message.text.strip()
+    if field == "phone":
+        if not helpers.is_valid_phone(value):
+            await message.answer("❌ Неверный номер.")
+            return
+        value = helpers.clean_phone(value)
+
+    async with async_session() as session:
+        r = await session.execute(select(Courier).where(Courier.id == courier_id))
+        c = r.scalar_one_or_none()
+        if c:
+            setattr(c, db_field, value)
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Обновлено.", reply_markup=kb.admin_main())
 
 
 # ═══════════════════════════════════════════
@@ -633,11 +826,13 @@ async def admin_send_message(message: Message, state: FSMContext):
 
 
 # ═══════════════════════════════════════════
-#   ПЕРЕВОДЫ — ВХОДЯЩИЕ
+#   ПЕРЕВОДЫ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_payments")
 async def payments_menu(call: CallbackQuery):
-    if not is_admin(call.from_user.id):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if not has_perm(perms, "payments"):
         await call.answer("Нет доступа", show_alert=True)
         return
     await call.message.edit_text("💳 <b>Переводы и платежи</b>",
@@ -658,17 +853,15 @@ async def pay_incoming(call: CallbackQuery):
 
     for p in payments[:10]:
         async with async_session() as session:
-            o_r = await session.execute(select(Order).where(Order.id == p.order_id))
-            order = o_r.scalar_one_or_none()
             c_r = await session.execute(select(Client).where(Client.id == p.client_id))
             client = c_r.scalar_one_or_none()
 
         text = (
             f"💳 <b>Платёж заказа #{p.order_id}</b>\n\n"
-            f"👤 Клиент: {client.name if client else '—'}\n"
-            f"💰 Сумма: {helpers.money(p.amount)}\n"
+            f"👤 {client.name if client else '—'}\n"
+            f"💰 {helpers.money(p.amount)}\n"
             f"🕒 {helpers.format_dt(p.created_at)}\n\n"
-            f"⚠️ Комментарий в банке: <b>{p.order_id}</b>"
+            f"⚠️ Комментарий: <b>{p.order_id}</b>"
         )
         await call.message.answer(text, reply_markup=kb.admin_confirm_payment(p.order_id))
     await call.answer()
@@ -679,7 +872,6 @@ async def pay_deliveries(call: CallbackQuery):
     async with async_session() as session:
         result = await session.execute(
             select(DeliveryPayment).where(DeliveryPayment.status == "pending")
-            .order_by(DeliveryPayment.created_at.asc())
         )
         payments = result.scalars().all()
 
@@ -691,17 +883,14 @@ async def pay_deliveries(call: CallbackQuery):
 
     for p in payments[:10]:
         async with async_session() as session:
-            d_r = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == p.delivery_id))
-            d = d_r.scalar_one_or_none()
             s_r = await session.execute(select(Shop).where(Shop.id == p.shop_id))
             shop = s_r.scalar_one_or_none()
 
         text = (
-            f"🚚 <b>Платёж доставки #Д-{p.delivery_id}</b>\n\n"
-            f"🏪 Магазин: {shop.name if shop else '—'}\n"
-            f"💰 Сумма: {helpers.money(p.amount)}\n"
-            f"🕒 {helpers.format_dt(p.created_at)}\n\n"
-            f"⚠️ Комментарий в банке: <b>Д-{p.delivery_id}</b>"
+            f"🚚 <b>Платёж #Д-{p.delivery_id}</b>\n\n"
+            f"🏪 {shop.name if shop else '—'}\n"
+            f"💰 {helpers.money(p.amount)}\n"
+            f"⚠️ Комментарий: <b>Д-{p.delivery_id}</b>"
         )
         await call.message.answer(text, reply_markup=kb.admin_confirm_delivery(p.delivery_id))
     await call.answer()
@@ -713,7 +902,7 @@ async def pay_ok(call: CallbackQuery):
     async with async_session() as session:
         order = await orders_service.confirm_payment(session, order_id, call.from_user.id)
 
-    await call.message.edit_text(f"✅ Оплата заказа #{order_id} подтверждена.")
+    await call.message.edit_text(f"✅ Оплата #{order_id} подтверждена.")
 
     if order:
         async with async_session() as s2:
@@ -726,9 +915,8 @@ async def pay_ok(call: CallbackQuery):
             try:
                 await bot_shop.send_message(
                     shop.tg_id,
-                    f"🔔 <b>Новый заказ #{order.id}</b>\n"
-                    f"📍 {order.address}\n"
-                    f"👤 {order.client_name}, {order.client_phone}\n"
+                    f"🔔 <b>Новый заказ #{order.id}</b>\n\n"
+                    f"📍 {order.address}\n👤 {order.client_name}, {order.client_phone}\n"
                     f"💰 {helpers.money(order.total_price)}"
                 )
             except Exception:
@@ -738,12 +926,12 @@ async def pay_ok(call: CallbackQuery):
             try:
                 await bot_client.send_message(
                     client.tg_id,
-                    f"✅ <b>Оплата заказа #{order.id} подтверждена!</b>\n\nЗаказ ушёл магазину 🌸"
+                    f"✅ <b>Оплата заказа #{order.id} подтверждена!</b>"
                 )
             except Exception:
                 pass
 
-    await log_action(f"Оплата заказа #{order_id} подтверждена")
+    await log_action(f"Оплата #{order_id} подтверждена")
     await call.answer()
 
 
@@ -761,74 +949,44 @@ async def pay_no(call: CallbackQuery):
             cr = await session.execute(select(Client).where(Client.id == order.client_id))
             client = cr.scalar_one_or_none()
 
-    await call.message.edit_text(f"❌ Платёж заказа #{order_id} отклонён.")
+    await call.message.edit_text(f"❌ Платёж #{order_id} отклонён.")
 
     if client and client.tg_id:
         try:
             await bot_client.send_message(
                 client.tg_id,
                 f"❌ <b>Платёж по заказу #{order_id} не подтверждён.</b>\n\n"
-                f"Проверьте, указали ли вы номер заказа в комментарии.\n"
-                f"Поддержка: {config.SUPPORT_TG}"
+                f"Проверьте комментарий.\nПоддержка: {config.SUPPORT_TG}"
             )
         except Exception:
             pass
 
-    await log_action(f"Платёж заказа #{order_id} отклонён")
+    await log_action(f"Платёж #{order_id} отклонён")
     await call.answer()
 
 
-# Подтверждение доставки
 @router.callback_query(F.data.startswith("admin_del_pay_ok_"))
 async def del_pay_ok(call: CallbackQuery):
     delivery_id = int(call.data.split("_")[4])
     async with async_session() as session:
-        d_r = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == delivery_id))
-        d = d_r.scalar_one_or_none()
-        if not d:
-            await call.answer("Не найдено", show_alert=True)
-            return
+        d = await payments_service.confirm_delivery_payment(session, delivery_id, call.from_user.id)
+        shop = None
+        if d:
+            s_r = await session.execute(select(Shop).where(Shop.id == d.shop_id))
+            shop = s_r.scalar_one_or_none()
 
-        d.payment_status = "confirmed"
-        d.status = "confirmed"
-
-        p_r = await session.execute(
-            select(DeliveryPayment).where(DeliveryPayment.delivery_id == delivery_id)
-        )
-        p = p_r.scalar_one_or_none()
-        if p:
-            p.status = "confirmed"
-            p.admin_id = call.from_user.id
-            p.confirmed_at = datetime.now()
-
-        await session.commit()
-
-        s_r = await session.execute(select(Shop).where(Shop.id == d.shop_id))
-        shop = s_r.scalar_one_or_none()
-
-    await call.message.edit_text(f"✅ Оплата доставки #Д-{delivery_id} подтверждена.")
+    await call.message.edit_text(f"✅ Оплата #Д-{delivery_id} подтверждена.")
 
     if shop and shop.tg_id:
         try:
             await bot_shop.send_message(
                 shop.tg_id,
-                f"✅ <b>Оплата доставки #Д-{delivery_id} подтверждена!</b>\n\n"
-                f"Заявка ушла курьерам 🚴"
+                f"✅ <b>Оплата доставки #Д-{delivery_id} подтверждена!</b>\n\nИщем курьера 🚴"
             )
         except Exception:
             pass
 
-    # Уведомление курьерам (push в свободные)
-    try:
-        from bots import bot_courier
-        await bot_courier.send_message(
-            config.ADMIN_ID,  # заглушка
-            f"🚚 Новая доставка #Д-{delivery_id} в ленте!"
-        )
-    except Exception:
-        pass
-
-    await log_action(f"Оплата доставки #Д-{delivery_id} подтверждена")
+    await log_action(f"Оплата #Д-{delivery_id} подтверждена")
     await call.answer()
 
 
@@ -836,44 +994,24 @@ async def del_pay_ok(call: CallbackQuery):
 async def del_pay_no(call: CallbackQuery):
     delivery_id = int(call.data.split("_")[4])
     async with async_session() as session:
-        d_r = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == delivery_id))
-        d = d_r.scalar_one_or_none()
+        d = await payments_service.reject_delivery_payment(session, delivery_id, call.from_user.id)
+        shop = None
         if d:
-            d.status = "cancel"
-            d.payment_status = "rejected"
+            s_r = await session.execute(select(Shop).where(Shop.id == d.shop_id))
+            shop = s_r.scalar_one_or_none()
 
-        p_r = await session.execute(
-            select(DeliveryPayment).where(DeliveryPayment.delivery_id == delivery_id)
-        )
-        p = p_r.scalar_one_or_none()
-        if p:
-            p.status = "rejected"
-            p.admin_id = call.from_user.id
-            p.confirmed_at = datetime.now()
-
-        await session.commit()
-
-        s_r = await session.execute(select(Shop).where(Shop.id == d.shop_id))
-        shop = s_r.scalar_one_or_none()
-
-    await call.message.edit_text(f"❌ Платёж доставки #Д-{delivery_id} отклонён.")
+    await call.message.edit_text(f"❌ Платёж #Д-{delivery_id} отклонён.")
 
     if shop and shop.tg_id:
         try:
-            await bot_shop.send_message(
-                shop.tg_id,
-                f"❌ Платёж доставки #Д-{delivery_id} не подтверждён.\n"
-                f"Проверьте комментарий."
-            )
+            await bot_shop.send_message(shop.tg_id,
+                f"❌ Платёж доставки #Д-{delivery_id} не подтверждён.")
         except Exception:
             pass
 
     await call.answer()
 
 
-# ═══════════════════════════════════════════
-#   ПЕРЕВОДЫ — ВЫПЛАТЫ
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_pay_outgoing")
 async def pay_outgoing(call: CallbackQuery):
     async with async_session() as session:
@@ -886,12 +1024,15 @@ async def pay_outgoing(call: CallbackQuery):
         return
 
     for p in payouts[:10]:
-        role_map = {"courier": "🚴 Курьер", "shop": "🏪 Магазин", "client": "👤 Клиент"}
+        role_map = {"courier": "🚴", "shop": "🏪", "client": "👤"}
+        method_map = {"card": "💳 Карта", "sbp": "📱 СБП"}
         text = (
             f"💸 <b>Выплата #{p.id}</b>\n\n"
-            f"👤 {role_map.get(p.user_type, p.user_type)} — ID {p.user_id}\n"
-            f"💰 Сумма: {helpers.money(p.amount)}\n"
-            f"🏦 Карта: {helpers.format_card(p.card_number or '—')}"
+            f"{role_map.get(p.user_type, '•')} ID {p.user_id}\n"
+            f"💰 {helpers.money(p.amount)}\n"
+            f"{method_map.get(p.method, '')}: {p.target or '—'}\n"
+            f"🏦 {p.bank_name or '—'}\n"
+            f"👤 {p.card_holder or '—'}"
         )
         if p.commission > 0:
             text += f"\n📉 Комиссия: {helpers.money(p.commission)}\n💵 К выплате: {helpers.money(p.amount_to_pay)}"
@@ -921,10 +1062,8 @@ async def payout_ok(call: CallbackQuery):
                 user = r.scalar_one_or_none()
                 if user and user.tg_id:
                     try:
-                        await bot_courier.send_message(
-                            user.tg_id,
-                            f"✅ Выплата {helpers.money(p.amount_to_pay)} зачислена!"
-                        )
+                        await bot_courier.send_message(user.tg_id,
+                            f"✅ Выплата {helpers.money(p.amount_to_pay)} зачислена!")
                     except Exception:
                         pass
             elif p.user_type == "shop":
@@ -932,10 +1071,8 @@ async def payout_ok(call: CallbackQuery):
                 user = r.scalar_one_or_none()
                 if user and user.tg_id:
                     try:
-                        await bot_shop.send_message(
-                            user.tg_id,
-                            f"✅ Выплата {helpers.money(p.amount_to_pay)} зачислена!"
-                        )
+                        await bot_shop.send_message(user.tg_id,
+                            f"✅ Выплата {helpers.money(p.amount_to_pay)} зачислена!")
                     except Exception:
                         pass
             elif p.user_type == "client":
@@ -943,10 +1080,8 @@ async def payout_ok(call: CallbackQuery):
                 user = r.scalar_one_or_none()
                 if user and user.tg_id:
                     try:
-                        await bot_client.send_message(
-                            user.tg_id,
-                            f"✅ Выплата {helpers.money(p.amount_to_pay)} зачислена!"
-                        )
+                        await bot_client.send_message(user.tg_id,
+                            f"✅ Выплата {helpers.money(p.amount_to_pay)} зачислена!")
                     except Exception:
                         pass
 
@@ -965,15 +1100,10 @@ async def payout_no(call: CallbackQuery):
     await call.answer()
 
 
-# ═══════════════════════════════════════════
-#   ИСТОРИЯ ПЕРЕВОДОВ
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_pay_history")
 async def pay_history(call: CallbackQuery):
-    await call.message.edit_text(
-        "📜 <b>История переводов</b>",
-        reply_markup=kb.admin_pay_history_menu()
-    )
+    await call.message.edit_text("📜 <b>История переводов</b>",
+                                 reply_markup=kb.admin_pay_history_menu())
     await call.answer()
 
 
@@ -983,7 +1113,7 @@ async def hist_in(call: CallbackQuery):
         r = await session.execute(select(Payment).order_by(Payment.id.desc()).limit(30))
         payments = r.scalars().all()
 
-    text = "📥 <b>Входящие платежи (30):</b>\n\n"
+    text = "📥 <b>Входящие (30):</b>\n\n"
     for p in payments:
         emoji = {"pending": "⏳", "confirmed": "✅", "rejected": "❌"}.get(p.status, "❓")
         text += f"{emoji} #{p.order_id} — {helpers.money(p.amount)} — {helpers.format_dt(p.created_at)}\n"
@@ -1001,7 +1131,7 @@ async def hist_out(call: CallbackQuery):
         r = await session.execute(select(Payout).order_by(Payout.id.desc()).limit(30))
         payouts = r.scalars().all()
 
-    text = "📤 <b>Исходящие выплаты (30):</b>\n\n"
+    text = "📤 <b>Исходящие (30):</b>\n\n"
     for p in payouts:
         emoji = {"pending": "⏳", "processing": "💳", "done": "✅", "rejected": "❌"}.get(p.status, "❓")
         role = {"courier": "🚴", "shop": "🏪", "client": "👤"}.get(p.user_type, "•")
@@ -1014,15 +1144,11 @@ async def hist_out(call: CallbackQuery):
     await call.answer()
 
 
-# ═══════════════════════════════════════════
-#   ВОЗВРАТЫ
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_pay_refunds")
 async def pay_refunds(call: CallbackQuery):
     async with async_session() as session:
         result = await session.execute(
-            select(Order).where(Order.status == "cancel")
-            .order_by(Order.id.desc()).limit(20)
+            select(Order).where(Order.status == "cancel").order_by(Order.id.desc()).limit(20)
         )
         orders = result.scalars().all()
 
@@ -1033,8 +1159,10 @@ async def pay_refunds(call: CallbackQuery):
         return
 
     refunds = [{"order_id": o.id, "amount": helpers.money(o.total_price)} for o in orders]
-    text = f"💸 <b>Возвраты ({len(refunds)})</b>\n\nВыберите заказ:"
-    await call.message.edit_text(text, reply_markup=kb.admin_refunds_list(refunds))
+    await call.message.edit_text(
+        f"💸 <b>Возвраты ({len(refunds)})</b>",
+        reply_markup=kb.admin_refunds_list(refunds)
+    )
     await call.answer()
 
 
@@ -1052,9 +1180,9 @@ async def admin_refund_view(call: CallbackQuery):
 
     text = (
         f"💸 <b>Заказ #{order.id}</b>\n\n"
-        f"👤 Клиент: {client.name if client else '—'}\n"
-        f"💰 Сумма: {helpers.money(order.total_price)}\n"
-        f"📋 Причина: {order.cancel_reason or '—'}"
+        f"👤 {client.name if client else '—'}\n"
+        f"💰 {helpers.money(order.total_price)}\n"
+        f"📋 {order.cancel_reason or '—'}"
     )
     await call.message.edit_text(text, reply_markup=kb.admin_refund_card(order_id))
     await call.answer()
@@ -1066,8 +1194,7 @@ async def admin_refund_card(call: CallbackQuery, state: FSMContext):
     await state.update_data(refund_order_id=order_id)
     await state.set_state(AdminFSM.refund_amount)
     await call.message.edit_text(
-        "💳 <b>Возврат на карту</b>\n\n"
-        "Введите номер карты клиента (16 цифр):",
+        "💳 Введите номер карты клиента (16 цифр):",
         reply_markup=kb.admin_cancel()
     )
     await call.answer()
@@ -1091,18 +1218,15 @@ async def admin_refund_card_process(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        await payments_service.create_payout(
-            session=session,
-            user_type="client",
-            user_id=order.client_id,
-            amount=order.total_price,
-            card_number=card,
+        await payments_service.refund_to_card(
+            session=session, client_id=order.client_id,
+            amount=order.total_price, card_number=card, order_id=order_id,
         )
 
-    await log_action(f"Возврат на карту для заказа #{order_id}")
+    await log_action(f"Возврат на карту #{order_id}")
     await state.clear()
     await message.answer(
-        f"✅ Возврат создан: {helpers.money(order.total_price)} → *{card[-4:]}",
+        f"✅ Возврат {helpers.money(order.total_price)} → *{card[-4:]}",
         reply_markup=kb.admin_main()
     )
 
@@ -1124,12 +1248,12 @@ async def admin_refund_balance(call: CallbackQuery):
             try:
                 await bot_client.send_message(
                     client.tg_id,
-                    f"💰 <b>Возврат {helpers.money(order.total_price)}</b>\n\nЗачислен на баланс."
+                    f"💰 <b>Возврат {helpers.money(order.total_price)}</b> зачислен на баланс."
                 )
             except Exception:
                 pass
 
-    await log_action(f"Возврат на баланс для заказа #{order_id}")
+    await log_action(f"Возврат на баланс #{order_id}")
     await call.answer("✅ Зачислено на баланс", show_alert=True)
     await pay_refunds(call)
 
@@ -1137,12 +1261,12 @@ async def admin_refund_balance(call: CallbackQuery):
 @router.callback_query(F.data.startswith("admin_refund_reject_"))
 async def admin_refund_reject(call: CallbackQuery):
     order_id = int(call.data.split("_")[3])
-    await call.answer("❌ Возврат отклонён", show_alert=True)
+    await call.answer("❌ Отклонено", show_alert=True)
     await pay_refunds(call)
 
 
 # ═══════════════════════════════════════════
-#   ДОСТАВКИ
+#   ДОСТАВКИ МАГАЗИНОВ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_deliveries")
 async def admin_deliveries(call: CallbackQuery):
@@ -1188,25 +1312,19 @@ async def admin_del_view(call: CallbackQuery):
         shop = s_r.scalar_one_or_none()
 
     status_map = {
-        "pending": "⏸ Ожидает оплаты",
-        "paid": "💳 Оплачено, ждёт подтверждения",
-        "confirmed": "✅ Подтверждено, ищем курьера",
-        "going": "🚴 Курьер в пути",
-        "picked": "📦 Курьер забрал",
-        "at_client": "📍 Курьер у клиента",
-        "done": "✅ Доставлено",
-        "cancel": "❌ Отменено",
+        "pending": "⏸ Ожидает оплаты", "paid": "💳 Ждёт админа",
+        "confirmed": "✅ Ищем курьера", "going": "🚴 В пути",
+        "picked": "📦 Забрал", "at_client": "📍 У клиента",
+        "done": "✅ Доставлено", "cancel": "❌ Отменено",
     }
-
     text = (
         f"🚚 <b>Доставка #Д-{d.id}</b>\n"
         f"{status_map.get(d.status, d.status)}\n\n"
-        f"🏪 Магазин: {shop.name if shop else '—'}\n"
+        f"🏪 {shop.name if shop else '—'}\n"
         f"📍 Откуда: {d.from_address}\n"
         f"📍 Куда: {d.to_address}\n"
         f"👤 {d.client_name}, {d.client_phone}\n"
-        f"📅 {helpers.format_date(d.delivery_date)} | 🕒 {d.delivery_slot or '—'}\n\n"
-        f"💰 Сумма: {helpers.money(d.client_pays)}"
+        f"💰 {helpers.money(d.client_pays)}"
     )
     await call.message.edit_text(text, reply_markup=kb.admin_delivery_view(delivery_id))
     await call.answer()
@@ -1222,42 +1340,18 @@ async def admin_del_cancel(call: CallbackQuery):
             d.status = "cancel"
             d.cancel_reason = "admin_cancelled"
             await session.commit()
-
             s_r = await session.execute(select(Shop).where(Shop.id == d.shop_id))
             shop = s_r.scalar_one_or_none()
             if shop and shop.tg_id:
                 try:
-                    await bot_shop.send_message(
-                        shop.tg_id,
-                        f"❌ Доставка #Д-{delivery_id} отменена админом."
-                    )
+                    await bot_shop.send_message(shop.tg_id,
+                        f"❌ Доставка #Д-{delivery_id} отменена админом.")
                 except Exception:
                     pass
 
     await log_action(f"Доставка #Д-{delivery_id} отменена")
     await call.answer("❌ Отменено", show_alert=True)
     await admin_deliveries(call)
-
-
-# ═══════════════════════════════════════════
-#   ФИНАНСЫ
-# ═══════════════════════════════════════════
-@router.callback_query(F.data == "admin_finance")
-async def finance(call: CallbackQuery):
-    async with async_session() as session:
-        s = await payments_service.get_finance_summary(session)
-
-    text = (
-        f"💰 <b>Финансовая сводка</b>\n\n"
-        f"📈 Общая касса: {helpers.money(s['total_income'])}\n"
-        f"📉 Доход платформы: {helpers.money(s['platform_income'])}\n"
-        f"✅ Доставлено: {s['done_orders']} заказов\n\n"
-        f"🏪 Магазинам: {helpers.money(s['shops_balance'])}\n"
-        f"🚴 Курьерам: {helpers.money(s['couriers_balance'])}\n"
-        f"💸 Ожидают выплаты: {helpers.money(s['pending_payouts'])}"
-    )
-    await call.message.edit_text(text, reply_markup=kb.admin_back())
-    await call.answer()
 
 
 # ═══════════════════════════════════════════
@@ -1290,9 +1384,7 @@ async def stuck_orders(call: CallbackQuery):
         fee = int(float(o.courier_fee or 0) + float(o.boost_amount or 0))
         text = (
             f"⏰ <b>Заказ #{o.id}</b>\n"
-            f"🕒 Ждёт: {wait_min} мин\n"
-            f"💰 Курьеру: {fee} ₽\n"
-            f"📍 {o.address}"
+            f"🕒 Ждёт: {wait_min} мин\n💰 Курьеру: {fee} ₽\n📍 {o.address}"
         )
         await call.message.answer(text, reply_markup=kb.admin_stuck_order(o.id))
     await call.answer()
@@ -1321,7 +1413,7 @@ async def admin_boost_set(call: CallbackQuery):
         )
         await session.commit()
 
-    await log_action(f"Boost +{amount} ₽ на заказ #{order_id}")
+    await log_action(f"Boost +{amount} ₽ на #{order_id}")
     await call.message.edit_text(f"✅ Ставка поднята на {amount} ₽.")
     await call.answer()
 
@@ -1331,10 +1423,7 @@ async def admin_boost_custom(call: CallbackQuery, state: FSMContext):
     order_id = int(call.data.split("_")[3])
     await state.update_data(boost_order_id=order_id)
     await state.set_state(AdminFSM.boost_custom)
-    await call.message.edit_text(
-        "💰 Введите сумму прибавки (₽):",
-        reply_markup=kb.admin_cancel()
-    )
+    await call.message.edit_text("💰 Введите сумму прибавки:", reply_markup=kb.admin_cancel())
     await call.answer()
 
 
@@ -1345,7 +1434,7 @@ async def admin_boost_custom_save(message: Message, state: FSMContext):
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("❌ Введите число больше 0.")
+        await message.answer("❌ Введите число > 0.")
         return
 
     data = await state.get_data()
@@ -1358,7 +1447,6 @@ async def admin_boost_custom_save(message: Message, state: FSMContext):
         )
         await session.commit()
 
-    await log_action(f"Boost +{amount} ₽ на заказ #{order_id}")
     await state.clear()
     await message.answer(f"✅ Ставка поднята на {amount} ₽.", reply_markup=kb.admin_main())
 
@@ -1369,12 +1457,10 @@ async def admin_cancel_order(call: CallbackQuery):
     async with async_session() as session:
         await orders_service.cancel_order(
             session, order_id,
-            reason="admin_cancelled",
-            cancelled_by="admin",
-            refund=True,
+            reason="admin_cancelled", cancelled_by="admin", refund=True,
         )
     await log_action(f"Заказ #{order_id} отменён админом")
-    await call.answer("❌ Заказ отменён", show_alert=True)
+    await call.answer("❌ Отменён", show_alert=True)
     await stuck_orders(call)
 
 
@@ -1383,7 +1469,9 @@ async def admin_cancel_order(call: CallbackQuery):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_promos")
 async def admin_promos(call: CallbackQuery):
-    if not is_admin(call.from_user.id):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if not has_perm(perms, "settings"):
         await call.answer("Нет доступа", show_alert=True)
         return
 
@@ -1392,7 +1480,7 @@ async def admin_promos(call: CallbackQuery):
         promos = result.scalars().all()
 
     if not promos:
-        text = "🎁 <b>Промокоды</b>\n\nПока нет ни одного промокода."
+        text = "🎁 Промокодов нет."
     else:
         text = f"🎁 <b>Промокоды ({len(promos)})</b>\n\n"
         for p in promos:
@@ -1413,9 +1501,7 @@ async def admin_promos(call: CallbackQuery):
 async def promo_create_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.promo_code)
     await call.message.edit_text(
-        "🎁 <b>Создание промокода</b>\n\n"
-        "Шаг 1/4: Введите код (латиницей, заглавными)\n\n"
-        "<i>Например: SUMMER20</i>",
+        "🎁 <b>Создание промокода</b>\n\nШаг 1/4: Введите код:",
         reply_markup=kb.admin_cancel()
     )
     await call.answer()
@@ -1425,13 +1511,13 @@ async def promo_create_start(call: CallbackQuery, state: FSMContext):
 async def promo_set_code(message: Message, state: FSMContext):
     code = message.text.strip().upper()
     if not code.isalnum():
-        await message.answer("❌ Только буквы и цифры, без пробелов.")
+        await message.answer("❌ Только буквы и цифры.")
         return
 
     async with async_session() as session:
         r = await session.execute(select(Promo).where(Promo.code == code))
         if r.scalar_one_or_none():
-            await message.answer("❌ Такой код уже существует.")
+            await message.answer("❌ Такой код уже есть.")
             return
 
     await state.update_data(promo_code=code)
@@ -1445,7 +1531,7 @@ async def promo_set_type(call: CallbackQuery, state: FSMContext):
     await state.update_data(discount_type=d_type)
     await state.set_state(AdminFSM.promo_value)
 
-    hint = "Введите процент скидки (1–100):" if d_type == "percent" else "Введите сумму скидки в рублях:"
+    hint = "Введите процент (1–100):" if d_type == "percent" else "Введите сумму в рублях:"
     await call.message.edit_text(f"🎁 Шаг 3/4: {hint}", reply_markup=kb.admin_cancel())
     await call.answer()
 
@@ -1457,14 +1543,13 @@ async def promo_set_value(message: Message, state: FSMContext):
         if value <= 0:
             raise ValueError
     except ValueError:
-        await message.answer("❌ Введите число больше 0.")
+        await message.answer("❌ Введите число > 0.")
         return
 
     await state.update_data(discount_value=value)
     await state.set_state(AdminFSM.promo_uses)
     await message.answer(
-        "🎁 Шаг 4/4: Лимит использований\n\n"
-        "Введите число или <code>0</code> — безлимит.",
+        "🎁 Шаг 4/4: Лимит использований\n\nЧисло или 0 (безлимит):",
         reply_markup=kb.admin_cancel()
     )
 
@@ -1493,10 +1578,7 @@ async def promo_set_uses(message: Message, state: FSMContext):
     await state.clear()
     d = f"{int(data['discount_value'])}%" if data["discount_type"] == "percent" else helpers.money(data["discount_value"])
     await message.answer(
-        f"✅ <b>Промокод создан!</b>\n\n"
-        f"🎁 <code>{data['promo_code']}</code>\n"
-        f"📊 Скидка: {d}\n"
-        f"🔢 Лимит: {max_uses or '∞'}",
+        f"✅ Промокод создан!\n🎁 <code>{data['promo_code']}</code> — {d}",
         reply_markup=kb.admin_main()
     )
 
@@ -1504,10 +1586,8 @@ async def promo_set_uses(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("admin_promo_view_"))
 async def promo_view(call: CallbackQuery):
     promo_id = int(call.data.split("_")[3])
-    await call.message.edit_text(
-        f"🎁 Промокод #{promo_id}",
-        reply_markup=kb.admin_promo_view(promo_id)
-    )
+    await call.message.edit_text(f"🎁 Промокод #{promo_id}",
+                                 reply_markup=kb.admin_promo_view(promo_id))
     await call.answer()
 
 
@@ -1532,101 +1612,79 @@ async def promo_delete(call: CallbackQuery):
 async def admin_complaints(call: CallbackQuery):
     async with async_session() as session:
         r = await session.execute(
-            select(Order).where(Order.status == "problem")
-            .order_by(Order.id.desc()).limit(20)
+            select(Complaint).where(Complaint.status == "pending")
+            .order_by(Complaint.id.desc()).limit(20)
         )
-        orders = r.scalars().all()
+        complaints = r.scalars().all()
 
-    if not orders:
+    if not complaints:
         await call.message.edit_text("✅ Жалоб нет.", reply_markup=kb.admin_back())
         await call.answer()
         return
 
-    complaints = [{"order_id": o.id, "type": o.cancel_reason or "жалоба"} for o in orders]
+    items = [{"id": c.id, "type": c.target_type} for c in complaints]
     await call.message.edit_text(
-        f"🆘 <b>Жалобы ({len(complaints)})</b>",
-        reply_markup=kb.admin_complaints_list(complaints)
+        f"🆘 <b>Жалобы ({len(items)})</b>",
+        reply_markup=kb.admin_complaints_list(items)
     )
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("admin_complaint_view_"))
 async def admin_complaint_view(call: CallbackQuery):
-    order_id = int(call.data.split("_")[3])
+    complaint_id = int(call.data.split("_")[3])
     async with async_session() as session:
-        r = await session.execute(select(Order).where(Order.id == order_id))
-        order = r.scalar_one_or_none()
-        if not order:
-            await call.answer("Не найден", show_alert=True)
+        r = await session.execute(select(Complaint).where(Complaint.id == complaint_id))
+        c = r.scalar_one_or_none()
+        if not c:
+            await call.answer("Не найдено", show_alert=True)
             return
 
     text = (
-        f"🆘 <b>Жалоба по заказу #{order.id}</b>\n\n"
-        f"👤 {order.client_name}, {order.client_phone}\n"
-        f"📍 {order.address}\n"
-        f"💰 {helpers.money(order.total_price)}\n"
-        f"📋 {order.cancel_reason or '—'}"
+        f"🆘 <b>Жалоба #{c.id}</b>\n\n"
+        f"🎯 На: {c.target_type} #{c.target_id}\n"
+        f"📦 Заказ: #{c.order_id}\n\n"
+        f"📝 {c.reason}"
     )
-    await call.message.edit_text(text, reply_markup=kb.admin_complaint_card(order_id))
+    await call.message.edit_text(text, reply_markup=kb.admin_complaint_card(complaint_id))
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("admin_comp_full_"))
-async def admin_comp_full(call: CallbackQuery):
-    order_id = int(call.data.split("_")[3])
+@router.callback_query(F.data.startswith("admin_comp_refund_"))
+async def admin_comp_refund(call: CallbackQuery):
+    complaint_id = int(call.data.split("_")[3])
     async with async_session() as session:
-        r = await session.execute(select(Order).where(Order.id == order_id))
-        order = r.scalar_one_or_none()
-        if order:
-            await payments_service.refund_to_balance(session, order.client_id, order.total_price, order_id)
-            order.status = "cancel"
+        r = await session.execute(select(Complaint).where(Complaint.id == complaint_id))
+        c = r.scalar_one_or_none()
+        if c:
+            o_r = await session.execute(select(Order).where(Order.id == c.order_id))
+            order = o_r.scalar_one_or_none()
+            if order:
+                await payments_service.refund_to_balance(
+                    session, order.client_id, order.total_price, order.id
+                )
+            c.status = "resolved"
+            c.admin_id = call.from_user.id
             await session.commit()
 
-            c_r = await session.execute(select(Client).where(Client.id == order.client_id))
-            client = c_r.scalar_one_or_none()
-            if client and client.tg_id:
-                try:
-                    await bot_client.send_message(
-                        client.tg_id,
-                        f"💰 <b>Возврат {helpers.money(order.total_price)}</b>\n\nЖалоба одобрена."
-                    )
-                except Exception:
-                    pass
-
-    await log_action(f"Жалоба #{order_id} одобрена")
-    await call.answer("✅ Полный возврат", show_alert=True)
+    await log_action(f"Жалоба #{complaint_id} одобрена")
+    await call.answer("✅ Возврат сделан", show_alert=True)
     await admin_complaints(call)
 
 
 @router.callback_query(F.data.startswith("admin_comp_reject_"))
 async def admin_comp_reject(call: CallbackQuery):
-    order_id = int(call.data.split("_")[3])
+    complaint_id = int(call.data.split("_")[3])
     async with async_session() as session:
-        r = await session.execute(select(Order).where(Order.id == order_id))
-        order = r.scalar_one_or_none()
-        if order:
-            order.status = "done"
+        r = await session.execute(select(Complaint).where(Complaint.id == complaint_id))
+        c = r.scalar_one_or_none()
+        if c:
+            c.status = "rejected"
+            c.admin_id = call.from_user.id
             await session.commit()
-    await log_action(f"Жалоба #{order_id} отклонена")
+    await log_action(f"Жалоба #{complaint_id} отклонена")
     await call.answer("❌ Отклонено", show_alert=True)
     await admin_complaints(call)
-
-
-@router.callback_query(F.data.startswith("admin_comp_details_"))
-async def admin_comp_details(call: CallbackQuery):
-    order_id = int(call.data.split("_")[3])
-    async with async_session() as session:
-        r = await session.execute(select(Order).where(Order.id == order_id))
-        order = r.scalar_one_or_none()
-
-    text = (
-        f"📊 <b>Заказ #{order_id}</b>\n\n"
-        f"Статус: {helpers.status_text(order.status) if order else '—'}\n"
-        f"Оплата: {order.payment_status if order else '—'}\n"
-        f"Создан: {helpers.format_dt(order.created_at) if order else '—'}"
-    )
-    await call.message.edit_text(text, reply_markup=kb.admin_back(f"admin_complaint_view_{order_id}"))
-    await call.answer()
 
 
 # ═══════════════════════════════════════════
@@ -1634,7 +1692,7 @@ async def admin_comp_details(call: CallbackQuery):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast(call: CallbackQuery):
-    await call.message.edit_text("📢 <b>Рассылка</b>\n\nКому отправить?",
+    await call.message.edit_text("📢 <b>Рассылка</b>\n\nКому?",
                                  reply_markup=kb.admin_broadcast_menu())
     await call.answer()
 
@@ -1644,7 +1702,7 @@ async def admin_bc_start(call: CallbackQuery, state: FSMContext):
     target = call.data.replace("admin_bc_", "")
     await state.update_data(bc_target=target)
     await state.set_state(AdminFSM.broadcast_text)
-    await call.message.edit_text("📝 Введите текст рассылки:", reply_markup=kb.admin_cancel())
+    await call.message.edit_text("📝 Введите текст:", reply_markup=kb.admin_cancel())
     await call.answer()
 
 
@@ -1657,7 +1715,7 @@ async def admin_bc_text(message: Message, state: FSMContext):
 
     await state.set_state(AdminFSM.broadcast_confirm)
     await message.answer(
-        f"👁 <b>Проверьте рассылку</b>\n\nКому: {target}\n\nТекст:\n{data['bc_text']}",
+        f"👁 <b>Проверьте</b>\n\nКому: {target}\n\n{data['bc_text']}",
         reply_markup=kb.admin_broadcast_confirm()
     )
 
@@ -1673,11 +1731,11 @@ async def admin_bc_send(call: CallbackQuery, state: FSMContext):
 
     async with async_session() as session:
         if target == "clients":
-            r = await session.execute(select(Client).where(Client.tg_id.isnot(None)))
+            r = await session.execute(select(Client).where(Client.tg_id.isnot(None), Client.is_blocked == False))
             ids = [u.tg_id for u in r.scalars().all()]
             bot = bot_client
         elif target == "couriers":
-            r = await session.execute(select(Courier).where(Courier.tg_id.isnot(None)))
+            r = await session.execute(select(Courier).where(Courier.tg_id.isnot(None), Courier.is_blocked == False))
             ids = [u.tg_id for u in r.scalars().all()]
             bot = bot_courier
         elif target == "shops":
@@ -1697,7 +1755,7 @@ async def admin_bc_send(call: CallbackQuery, state: FSMContext):
     await log_action(f"Рассылка ({target}): {sent}")
     await state.clear()
     await call.message.edit_text(
-        f"✅ <b>Рассылка завершена</b>\n\n📤 Отправлено: {sent}\n❌ Ошибок: {failed}",
+        f"✅ Рассылка завершена.\n📤 {sent}\n❌ {failed}",
         reply_markup=kb.admin_main()
     )
     await call.answer()
@@ -1708,10 +1766,8 @@ async def admin_bc_send(call: CallbackQuery, state: FSMContext):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_analytics")
 async def admin_analytics(call: CallbackQuery):
-    await call.message.edit_text(
-        "📊 <b>Аналитика</b>\n\nВыберите период:",
-        reply_markup=kb.admin_analytics_menu()
-    )
+    await call.message.edit_text("📊 <b>Аналитика</b>\n\nПериод:",
+                                 reply_markup=kb.admin_analytics_menu())
     await call.answer()
 
 
@@ -1719,7 +1775,10 @@ async def admin_analytics(call: CallbackQuery):
 async def admin_analytics_period(call: CallbackQuery):
     period = call.data.replace("admin_analytics_", "")
     now = datetime.now()
-    if period == "week":
+    if period == "today":
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = "Сегодня"
+    elif period == "week":
         since = now - timedelta(days=7)
         label = "За неделю"
     elif period == "month":
@@ -1736,18 +1795,14 @@ async def admin_analytics_period(call: CallbackQuery):
     total = len(orders)
     done = sum(1 for o in orders if o.status == "done")
     cancel = sum(1 for o in orders if o.status == "cancel")
-    in_work = sum(1 for o in orders if o.status in ("pending", "wait", "going", "picked", "delivering", "at_client"))
     turnover = sum(float(o.total_price) for o in orders if o.status == "done")
     platform = sum(float(o.platform_income) for o in orders if o.status == "done")
 
     text = (
         f"📊 <b>Аналитика — {label}</b>\n\n"
-        f"📦 Заказов: {total}\n"
-        f"✅ Доставлено: {done}\n"
-        f"❌ Отменено: {cancel}\n"
-        f"⏳ В работе: {in_work}\n\n"
+        f"📦 Заказов: {total}\n✅ Доставлено: {done}\n❌ Отменено: {cancel}\n\n"
         f"💰 Оборот: {helpers.money(turnover)}\n"
-        f"📈 Доход платформы: {helpers.money(platform)}"
+        f"📈 Доход: {helpers.money(platform)}"
     )
     await call.message.edit_text(text, reply_markup=kb.admin_analytics_menu())
     await call.answer()
@@ -1764,10 +1819,9 @@ async def admin_top_shops(call: CallbackQuery):
 
     text = "🏆 <b>Топ-10 магазинов:</b>\n\n"
     for i, s in enumerate(shops, start=1):
-        text += f"{i}. {s.name} — {s.total_orders} заказов — ⭐ {float(s.rating or 0):.1f}\n"
-
+        text += f"{i}. {s.name} — {s.total_orders} — ⭐ {float(s.rating or 0):.1f}\n"
     if not shops:
-        text = "🏆 Пока нет данных."
+        text = "🏆 Нет данных."
 
     await call.message.edit_text(text, reply_markup=kb.admin_back("admin_analytics"))
     await call.answer()
@@ -1784,10 +1838,33 @@ async def admin_top_couriers(call: CallbackQuery):
 
     text = "🏆 <b>Топ-10 курьеров:</b>\n\n"
     for i, c in enumerate(couriers, start=1):
-        text += f"{i}. {c.name} — {c.total_orders} заказов — ⭐ {float(c.rating or 0):.1f}\n"
-
+        text += f"{i}. {c.name} — {c.total_orders} — ⭐ {float(c.rating or 0):.1f}\n"
     if not couriers:
-        text = "🏆 Пока нет данных."
+        text = "🏆 Нет данных."
+
+    await call.message.edit_text(text, reply_markup=kb.admin_back("admin_analytics"))
+    await call.answer()
+
+
+@router.callback_query(F.data == "admin_shifts_dashboard")
+async def admin_shifts_dashboard(call: CallbackQuery):
+    async with async_session() as session:
+        r = await session.execute(
+            select(Courier).where(Courier.courier_state == "on")
+        )
+        on_shift = r.scalars().all()
+
+    if not on_shift:
+        await call.message.edit_text("👥 Никого нет на смене.", reply_markup=kb.admin_back("admin_analytics"))
+        await call.answer()
+        return
+
+    text = f"👥 <b>На смене ({len(on_shift)})</b>\n\n"
+    for c in on_shift:
+        lat = f"{float(c.lat):.4f}" if c.lat else "—"
+        lon = f"{float(c.lon):.4f}" if c.lon else "—"
+        loc_time = helpers.format_time(c.loc_time) if c.loc_time else "—"
+        text += f"• {c.name} — 📍 {lat}, {lon} (обновлено {loc_time})\n"
 
     await call.message.edit_text(text, reply_markup=kb.admin_back("admin_analytics"))
     await call.answer()
@@ -1798,14 +1875,19 @@ async def admin_top_couriers(call: CallbackQuery):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_settings")
 async def admin_settings(call: CallbackQuery):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if not has_perm(perms, "settings"):
+        await call.answer("Нет доступа", show_alert=True)
+        return
+
     text = (
         f"⚙️ <b>Настройки системы</b>\n\n"
         f"💸 Зоны доставки: 350–600 ₽\n"
         f"💰 Мин. вывод курьера: {config.COURIER_MIN_WITHDRAW} ₽\n"
-        f"🎁 Бонус за 10 заказов: {config.BONUS_PER_10_ORDERS} ₽\n"
-        f"🕒 Часы работы: {config.WORK_HOURS}\n"
-        f"🏙 Город: {config.CITY}\n\n"
-        f"<i>Значения из config.py.</i>"
+        f"🎁 Бонус за 10: {config.BONUS_PER_10_ORDERS} ₽\n"
+        f"🕒 Часы: {config.WORK_HOURS}\n"
+        f"🏙 Город: {config.CITY}"
     )
     await call.message.edit_text(text, reply_markup=kb.admin_settings_menu())
     await call.answer()
@@ -1814,9 +1896,7 @@ async def admin_settings(call: CallbackQuery):
 @router.callback_query(F.data == "admin_multicity")
 async def multicity_stub(call: CallbackQuery):
     await call.message.edit_text(
-        "🌍 <b>Мультигород</b>\n\n"
-        "🚧 Раздел в разработке.\n\n"
-        "Планируем:\n"
+        "🌍 <b>Мультигород</b>\n\n🚧 В разработке.\n\nПланируем:\n"
         "• Один бот на несколько городов\n"
         "• Клиент выбирает свой город\n"
         "• Отдельные магазины и курьеры",
@@ -1825,14 +1905,296 @@ async def multicity_stub(call: CallbackQuery):
     await call.answer()
 
 
+# Обновление бота
+@router.callback_query(F.data == "admin_update_bot")
+async def admin_update_bot(call: CallbackQuery):
+    await call.message.edit_text(
+        "🔄 <b>Обновление бота</b>\n\n"
+        "Создайте обновление и отправьте всем пользователям.",
+        reply_markup=kb.admin_update_bot_menu()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "admin_update_new")
+async def update_new_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.update_version)
+    await call.message.edit_text("📝 Введите версию (например 1.2.0):",
+                                 reply_markup=kb.admin_cancel())
+    await call.answer()
+
+
+@router.message(AdminFSM.update_version)
+async def update_set_version(message: Message, state: FSMContext):
+    await state.update_data(update_version=message.text.strip())
+    await state.set_state(AdminFSM.update_changes)
+    await message.answer("📝 Опишите изменения:", reply_markup=kb.admin_cancel())
+
+
+@router.message(AdminFSM.update_changes)
+async def update_set_changes(message: Message, state: FSMContext):
+    await state.update_data(update_changes=message.text.strip())
+    data = await state.get_data()
+
+    await state.set_state(AdminFSM.update_changes)  # временно оставим
+    await state.clear()
+
+    await message.answer(
+        f"👁 <b>Проверьте обновление</b>\n\n"
+        f"📌 Версия: {data['update_version']}\n\n{data['update_changes']}\n\n"
+        f"Отправить всем?",
+        reply_markup=kb.admin_update_confirm()
+    )
+
+    # Сохраняем данные в FSM повторно
+    await state.update_data(
+        update_version=data["update_version"],
+        update_changes=data["update_changes"],
+        ready_to_send=True,
+    )
+
+
+@router.callback_query(F.data == "admin_update_send")
+async def update_send(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    version = data.get("update_version")
+    changes = data.get("update_changes")
+    if not version or not changes:
+        await call.answer("Данные потеряны", show_alert=True)
+        return
+
+    text = f"🔄 <b>Обновление {version}</b>\n\n{changes}"
+
+    ids = []
+    async with async_session() as session:
+        # Клиенты
+        r = await session.execute(select(Client).where(Client.tg_id.isnot(None), Client.is_blocked == False))
+        clients = [u.tg_id for u in r.scalars().all()]
+        # Курьеры
+        r = await session.execute(select(Courier).where(Courier.tg_id.isnot(None), Courier.is_blocked == False))
+        couriers = [u.tg_id for u in r.scalars().all()]
+        # Магазины
+        r = await session.execute(select(Shop).where(Shop.tg_id.isnot(None)))
+        shops = [u.tg_id for u in r.scalars().all()]
+
+        # Записываем обновление
+        upd = BotUpdate(version=version, changes=changes, sent_to_all=True)
+        session.add(upd)
+        await session.commit()
+
+    sent = 0
+    for uid in clients:
+        try:
+            await bot_client.send_message(uid, text)
+            sent += 1
+        except Exception:
+            pass
+    for uid in couriers:
+        try:
+            await bot_courier.send_message(uid, text)
+            sent += 1
+        except Exception:
+            pass
+    for uid in shops:
+        try:
+            await bot_shop.send_message(uid, text)
+            sent += 1
+        except Exception:
+            pass
+
+    await state.clear()
+    await log_action(f"Обновление {version} отправлено: {sent}")
+    await call.message.edit_text(
+        f"✅ Обновление {version} отправлено {sent} пользователям.",
+        reply_markup=kb.admin_main()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "admin_update_history")
+async def update_history(call: CallbackQuery):
+    async with async_session() as session:
+        r = await session.execute(select(BotUpdate).order_by(BotUpdate.id.desc()).limit(20))
+        updates = r.scalars().all()
+
+    if not updates:
+        text = "📜 История обновлений пуста."
+    else:
+        text = "📜 <b>История обновлений:</b>\n\n"
+        for u in updates:
+            text += f"<b>{u.version}</b> — {helpers.format_dt(u.created_at)}\n{u.changes[:100]}\n\n"
+
+    await call.message.edit_text(text, reply_markup=kb.admin_update_bot_menu())
+    await call.answer()
+
+
 # ═══════════════════════════════════════════
-#   ДОСТУП — БЛОКИРОВКА ПО ID
+#   МУЛЬТИАДМИН
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "admin_admins")
+async def admin_admins(call: CallbackQuery):
+    async with async_session() as session:
+        perms = await get_admin_permissions(session, call.from_user.id)
+    if not has_perm(perms, "admins"):
+        await call.answer("Нет доступа", show_alert=True)
+        return
+
+    await call.message.edit_text(
+        "🔑 <b>Управление админами</b>\n\n"
+        f"👑 Главный админ: <code>{config.ADMIN_ID}</code>",
+        reply_markup=kb.admin_admins_menu()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "admin_add_admin")
+async def add_admin_start(call: CallbackQuery, state: FSMContext):
+    await state.set_state(AdminFSM.add_admin_id)
+    await call.message.edit_text(
+        "➕ <b>Новый админ</b>\n\nВведите Telegram ID:",
+        reply_markup=kb.admin_cancel()
+    )
+    await call.answer()
+
+
+@router.message(AdminFSM.add_admin_id)
+async def add_admin_set_id(message: Message, state: FSMContext):
+    try:
+        tg_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Введите число.")
+        return
+
+    if tg_id == config.ADMIN_ID:
+        await message.answer("❌ Это главный админ.")
+        return
+
+    async with async_session() as session:
+        r = await session.execute(select(Admin).where(Admin.tg_id == tg_id))
+        if r.scalar_one_or_none():
+            await message.answer("❌ Уже админ.")
+            return
+
+    await state.update_data(new_admin_id=tg_id)
+    await state.set_state(AdminFSM.add_admin_name)
+    await message.answer("📝 Введите имя (или /skip):", reply_markup=kb.admin_cancel())
+
+
+@router.message(AdminFSM.add_admin_name)
+async def add_admin_set_name(message: Message, state: FSMContext):
+    txt = message.text.strip()
+    name = None if txt.startswith("/skip") else txt
+
+    async with async_session() as session:
+        admin = Admin(
+            tg_id=(await state.get_data()).get("new_admin_id"),
+            name=name,
+            added_by=message.from_user.id,
+            permissions="{}",
+            is_active=True,
+        )
+        session.add(admin)
+        await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Админ добавлен. Настройте права.",
+                         reply_markup=kb.admin_main())
+
+
+@router.callback_query(F.data == "admin_list_admins")
+async def list_admins(call: CallbackQuery):
+    async with async_session() as session:
+        r = await session.execute(select(Admin).where(Admin.is_active == True))
+        admins = r.scalars().all()
+
+    if not admins:
+        text = "📋 Дополнительных админов нет."
+    else:
+        text = f"📋 <b>Админы ({len(admins)})</b>\n\n"
+        for a in admins:
+            text += f"• {a.name or '—'} — <code>{a.tg_id}</code>\n"
+
+    rows = [[kb.btn("👑 Главный", "noop")]]
+    for a in admins:
+        rows.append([kb.btn(f"🔑 {a.name or a.tg_id}", f"admin_admin_view_{a.id}")])
+    rows.append([kb.btn("🔙 Назад", "admin_admins")])
+
+    await call.message.edit_text(text, reply_markup=kb.kb(rows))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("admin_admin_view_"))
+async def admin_admin_view(call: CallbackQuery):
+    admin_id = int(call.data.split("_")[3])
+    async with async_session() as session:
+        r = await session.execute(select(Admin).where(Admin.id == admin_id))
+        admin = r.scalar_one_or_none()
+        if not admin:
+            await call.answer("Не найден", show_alert=True)
+            return
+
+    active = list(helpers.parse_permissions(admin.permissions).keys())
+    text = f"🔑 <b>{admin.name or admin.tg_id}</b>\n\nID: <code>{admin.tg_id}</code>\n\nВыберите права:"
+    await call.message.edit_text(text, reply_markup=kb.admin_permissions_menu(admin_id, active))
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("perm_toggle_"))
+async def perm_toggle(call: CallbackQuery):
+    parts = call.data.split("_")
+    admin_id = int(parts[2])
+    key = parts[3]
+
+    async with async_session() as session:
+        r = await session.execute(select(Admin).where(Admin.id == admin_id))
+        admin = r.scalar_one_or_none()
+        if not admin:
+            await call.answer("Не найден", show_alert=True)
+            return
+
+        perms = helpers.parse_permissions(admin.permissions)
+        perms[key] = not perms.get(key, False)
+        admin.permissions = helpers.permissions_to_str(perms)
+        await session.commit()
+        active = list(k for k, v in perms.items() if v)
+
+    try:
+        await call.message.edit_reply_markup(
+            reply_markup=kb.admin_permissions_menu(admin_id, active)
+        )
+    except Exception:
+        pass
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("perm_save_"))
+async def perm_save(call: CallbackQuery):
+    admin_id = int(call.data.split("_")[2])
+    await call.answer("✅ Сохранено", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_del_") & ~F.data.startswith("admin_del_pay_") & ~F.data.startswith("admin_del_view_") & ~F.data.startswith("admin_del_cancel_") & ~F.data.startswith("admin_deliveries"))
+async def admin_del_admin(call: CallbackQuery):
+    admin_id = int(call.data.split("_")[2])
+    async with async_session() as session:
+        r = await session.execute(select(Admin).where(Admin.id == admin_id))
+        admin = r.scalar_one_or_none()
+        if admin:
+            admin.is_active = False
+            await session.commit()
+
+    await log_action(f"Админ #{admin_id} удалён")
+    await call.answer("🗑 Удалён", show_alert=True)
+    await admin_admins(call)
+
+
+# ═══════════════════════════════════════════
+#   ДОСТУП ПО ID
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_access")
 async def admin_access(call: CallbackQuery):
     await call.message.edit_text(
-        "🔒 <b>Управление доступом</b>\n\n"
-        "Заблокируйте или разблокируйте пользователя по Telegram ID.",
+        "🔒 <b>Управление доступом</b>\n\nЗаблокируйте или разблокируйте по Telegram ID.",
         reply_markup=kb.admin_access_menu()
     )
     await call.answer()
@@ -1841,11 +2203,7 @@ async def admin_access(call: CallbackQuery):
 @router.callback_query(F.data == "admin_block_by_id")
 async def block_by_id_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.block_by_id)
-    await call.message.edit_text(
-        "🚫 <b>Блокировка по ID</b>\n\n"
-        "Введите Telegram ID пользователя:",
-        reply_markup=kb.admin_cancel()
-    )
+    await call.message.edit_text("🚫 Введите Telegram ID:", reply_markup=kb.admin_cancel())
     await call.answer()
 
 
@@ -1859,7 +2217,6 @@ async def block_by_id_apply(message: Message, state: FSMContext):
 
     found = False
     async with async_session() as session:
-        # Ищем в магазинах
         r = await session.execute(select(Shop).where(Shop.tg_id == tg_id))
         shop = r.scalar_one_or_none()
         if shop:
@@ -1883,20 +2240,21 @@ async def block_by_id_apply(message: Message, state: FSMContext):
 
     if found:
         await state.clear()
-        await message.answer(f"🚫 Пользователь {tg_id} заблокирован.", reply_markup=kb.admin_main())
-        await log_action(f"Заблокирован пользователь {tg_id}")
+        await message.answer(f"🚫 Пользователь {tg_id} заблокирован.",
+                             reply_markup=kb.admin_main())
+        await log_action(f"Заблокирован {tg_id}")
     else:
-        await message.answer(f"❌ Пользователь {tg_id} не найден.")
+        await message.answer(
+            f"❌ Пользователь {tg_id} не найден.\n\n"
+            f"Проверьте, что ID правильный (только цифры)."
+        )
+        await state.clear()
 
 
 @router.callback_query(F.data == "admin_unblock_by_id")
 async def unblock_by_id_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.unblock_by_id)
-    await call.message.edit_text(
-        "✅ <b>Разблокировка по ID</b>\n\n"
-        "Введите Telegram ID пользователя:",
-        reply_markup=kb.admin_cancel()
-    )
+    await call.message.edit_text("✅ Введите Telegram ID:", reply_markup=kb.admin_cancel())
     await call.answer()
 
 
@@ -1933,8 +2291,9 @@ async def unblock_by_id_apply(message: Message, state: FSMContext):
 
     if found:
         await state.clear()
-        await message.answer(f"✅ Пользователь {tg_id} разблокирован.", reply_markup=kb.admin_main())
-        await log_action(f"Разблокирован пользователь {tg_id}")
+        await message.answer(f"✅ Пользователь {tg_id} разблокирован.",
+                             reply_markup=kb.admin_main())
+        await log_action(f"Разблокирован {tg_id}")
     else:
         await message.answer(f"❌ Пользователь {tg_id} не найден.")
 
@@ -1949,7 +2308,7 @@ async def admin_logs(call: CallbackQuery):
         logs = r.scalars().all()
 
     if not logs:
-        text = "📜 <b>Логи</b>\n\nПока пусто."
+        text = "📜 Логи пусты."
     else:
         text = "📜 <b>Последние 30 записей:</b>\n\n"
         for lg in logs:
