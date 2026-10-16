@@ -32,6 +32,12 @@ class Client(Base):
     last_location_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     active_promo: Mapped[str | None] = mapped_column(String(50), nullable=True)
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    card_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    card_holder: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sbp_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -85,8 +91,16 @@ class Shop(Base):
     total_orders: Mapped[int] = mapped_column(Integer, default=0)
     rejected_count: Mapped[int] = mapped_column(Integer, default=0)
     is_paused: Mapped[bool] = mapped_column(Boolean, default=False)
+
     work_start: Mapped[str] = mapped_column(String(5), default="08:00")
     work_end: Mapped[str] = mapped_column(String(5), default="22:00")
+    schedule: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    card_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    card_holder: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sbp_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -118,6 +132,7 @@ class Product(Base):
     client_price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     order_count: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_draft: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -128,6 +143,16 @@ class Favorite(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"))
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ShopSubscription(Base):
+    __tablename__ = "shop_subscriptions"
+    __table_args__ = (UniqueConstraint("client_id", "shop_id", name="uq_sub"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"))
+    shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -144,7 +169,6 @@ class Courier(Base):
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     city: Mapped[str | None] = mapped_column(String(100), nullable=True)
     transport: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    card_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     courier_state: Mapped[str] = mapped_column(String(20), default="off")
@@ -160,6 +184,12 @@ class Courier(Base):
     is_paused_geo: Mapped[bool] = mapped_column(Boolean, default=False)
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     work_radius_km: Mapped[int] = mapped_column(Integer, default=5)
+
+    card_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    card_holder: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sbp_phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -190,7 +220,7 @@ class CartItem(Base):
 
 
 # ═══════════════════════════════════════════
-#   ЗАКАЗЫ (от клиента)
+#   ЗАКАЗЫ
 # ═══════════════════════════════════════════
 class Order(Base):
     __tablename__ = "orders"
@@ -256,22 +286,19 @@ class OrderItem(Base):
 
 
 # ═══════════════════════════════════════════
-#   СВОЯ ДОСТАВКА (магазин создаёт сам)
+#   СВОЯ ДОСТАВКА
 # ═══════════════════════════════════════════
 class DeliveryOrder(Base):
-    """Заявка на доставку, которую создаёт магазин."""
     __tablename__ = "delivery_orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id"))
     courier_id: Mapped[int | None] = mapped_column(ForeignKey("couriers.id"), nullable=True)
 
-    # Откуда (авто из магазина)
     from_address: Mapped[str] = mapped_column(Text)
     from_lat: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
     from_lon: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
 
-    # Куда
     to_address: Mapped[str] = mapped_column(Text)
     to_lat: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
     to_lon: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
@@ -282,24 +309,19 @@ class DeliveryOrder(Base):
     delivery_date: Mapped[date] = mapped_column(Date, default=date.today)
     delivery_slot: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
-    # Фото букета
     bouquet_photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # Комментарии
     shop_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     client_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Фото вручения
     need_delivery_photo: Mapped[bool] = mapped_column(Boolean, default=False)
     delivery_photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
-    # Деньги
     distance_km: Mapped[float] = mapped_column(Numeric(6, 2), default=0)
     client_pays: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
     courier_fee: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
     platform_fee: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
 
-    # Статус
     status: Mapped[str] = mapped_column(String(30), default="pending")
     payment_status: Mapped[str] = mapped_column(String(20), default="pending")
 
@@ -357,7 +379,6 @@ class Payment(Base):
 
 
 class DeliveryPayment(Base):
-    """Платежи за «Свою доставку»."""
     __tablename__ = "delivery_payments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -380,8 +401,13 @@ class Payout(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     commission: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
     amount_to_pay: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+
+    method: Mapped[str] = mapped_column(String(20), default="card")
+    target: Mapped[str | None] = mapped_column(String(50), nullable=True)
     card_number: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    holder_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    card_holder: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     status: Mapped[str] = mapped_column(String(20), default="pending")
     admin_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -389,7 +415,7 @@ class Payout(Base):
 
 
 # ═══════════════════════════════════════════
-#   ОТЗЫВЫ
+#   ОТЗЫВЫ И ЖАЛОБЫ
 # ═══════════════════════════════════════════
 class Review(Base):
     __tablename__ = "reviews"
@@ -402,6 +428,21 @@ class Review(Base):
     rating: Mapped[int] = mapped_column(Integer)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class Complaint(Base):
+    __tablename__ = "complaints"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    order_id: Mapped[int] = mapped_column(Integer)
+    from_tg_id: Mapped[int] = mapped_column(BigInteger)
+    target_type: Mapped[str] = mapped_column(String(20))
+    target_id: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    admin_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -457,6 +498,21 @@ class CourierAchievement(Base):
 
 
 # ═══════════════════════════════════════════
+#   АДМИНЫ (мультиадмин)
+# ═══════════════════════════════════════════
+class Admin(Base):
+    __tablename__ = "admins"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    added_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    permissions: Mapped[str] = mapped_column(Text, default="{}")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ═══════════════════════════════════════════
 #   ЛОГИ
 # ═══════════════════════════════════════════
 class Log(Base):
@@ -464,4 +520,31 @@ class Log(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ChangeLog(Base):
+    __tablename__ = "change_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    object_type: Mapped[str] = mapped_column(String(20))
+    object_id: Mapped[int] = mapped_column(Integer)
+    field: Mapped[str] = mapped_column(String(50))
+    old_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    new_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_by: Mapped[str] = mapped_column(String(20))
+    changed_by_id: Mapped[int] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+# ═══════════════════════════════════════════
+#   ОБНОВЛЕНИЯ БОТА
+# ═══════════════════════════════════════════
+class BotUpdate(Base):
+    __tablename__ = "bot_updates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[str] = mapped_column(String(20))
+    changes: Mapped[str] = mapped_column(Text)
+    sent_to_all: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
