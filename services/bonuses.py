@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — бонусы и рефералка
+SLIPI — бонусы, рефералка, уровни, достижения
 """
 from datetime import datetime, date, timedelta
 from decimal import Decimal
@@ -74,7 +74,7 @@ async def apply_all_daily_bonuses(session: AsyncSession):
 
 
 # ═══════════════════════════════════════════
-#   РЕФЕРАЛКА
+#   РЕФЕРАЛЬНАЯ ПРОГРАММА
 # ═══════════════════════════════════════════
 async def apply_referral_percent(
     session: AsyncSession,
@@ -127,7 +127,7 @@ async def register_referral(
 
 
 # ═══════════════════════════════════════════
-#   УРОВНИ
+#   УРОВНИ КУРЬЕРОВ
 # ═══════════════════════════════════════════
 LEVELS = [
     ("newbie",      "🥉 Новичок",  0,   0),
@@ -186,7 +186,6 @@ async def grant_achievement(session: AsyncSession, courier_id: int, code: str) -
     )
     ach = ach_result.scalar_one_or_none()
     if not ach:
-        # Создаём достижение, если нет
         info = next((a for a in ACHIEVEMENTS_LIST if a["code"] == code), None)
         if not info:
             return False
@@ -212,6 +211,18 @@ async def grant_achievement(session: AsyncSession, courier_id: int, code: str) -
 
 
 async def check_achievements(session: AsyncSession, courier_id: int):
+    """Проверяет и выдаёт достижения."""
+    # Первый заказ
+    c_result = await session.execute(select(Courier).where(Courier.id == courier_id))
+    courier = c_result.scalar_one_or_none()
+    if courier and courier.total_orders >= 1:
+        await grant_achievement(session, courier_id, "first_order")
+    if courier and courier.total_orders >= 100:
+        await grant_achievement(session, courier_id, "legend_100")
+    if courier and courier.total_orders >= 500:
+        await grant_achievement(session, courier_id, "legend_500")
+
+    # Спринтер (10 за день)
     result = await session.execute(
         select(CourierDailyStat).where(
             CourierDailyStat.courier_id == courier_id,
