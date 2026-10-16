@@ -2,7 +2,7 @@
 """
 SLIPI — бот курьера
 """
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from decimal import Decimal
 
 from aiogram import Router, F
@@ -17,7 +17,8 @@ import keyboards as kb
 from states import CourierReg, CourierFSM
 from database import async_session
 from models import (
-    Courier, Order, OrderItem, Shop, Client, DeliveryOrder, ChatMessage,
+    Courier, Order, OrderItem, Shop, Client, DeliveryOrder,
+    CourierDailyStat, Transaction,
 )
 from services import orders as orders_service
 from services import geo as geo_service
@@ -81,7 +82,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
     if courier.is_blocked or courier.status == "blocked":
         await message.answer(
-            "🚫 <b>Доступ закрыт.</b>\n\n"
+            f"🚫 <b>Доступ закрыт.</b>\n\n"
             f"Напишите в поддержку: {config.SUPPORT_TG}",
             reply_markup=kb.courier_support()
         )
@@ -106,7 +107,7 @@ async def back_menu(call: CallbackQuery, state: FSMContext):
 async def courier_support_handler(call: CallbackQuery):
     await call.message.edit_text(
         f"🆘 <b>Поддержка SLIPI</b>\n\n"
-        f"Напишите нам: {config.SUPPORT_TG}\n"
+        f"Напишите: {config.SUPPORT_TG}\n"
         f"📞 {config.SUPPORT_PHONE}",
         reply_markup=kb.courier_support()
     )
@@ -125,20 +126,14 @@ async def courier_register(message: Message, state: FSMContext):
             return
 
     await state.set_state(CourierReg.name)
-    await message.answer(
-        "📝 <b>Шаг 1/6:</b> Ваше имя\n\n<i>Например: Иван</i>",
-        reply_markup=kb.cancel_kb("courier_menu")
-    )
+    await message.answer("📝 <b>Шаг 1/6:</b> Ваше имя", reply_markup=kb.cancel_kb("courier_menu"))
 
 
 @router.message(CourierReg.name)
 async def reg_name(message: Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
     await state.set_state(CourierReg.phone)
-    await message.answer(
-        "📞 <b>Шаг 2/6:</b> Телефон\n\n<i>Формат: 8XXXXXXXXXX</i>",
-        reply_markup=kb.cancel_kb("courier_menu")
-    )
+    await message.answer("📞 <b>Шаг 2/6:</b> Телефон", reply_markup=kb.cancel_kb("courier_menu"))
 
 
 @router.message(CourierReg.phone)
@@ -148,10 +143,8 @@ async def reg_phone(message: Message, state: FSMContext):
         return
     await state.update_data(phone=helpers.clean_phone(message.text))
     await state.set_state(CourierReg.city)
-    await message.answer(
-        f"🏙 <b>Шаг 3/6:</b> Город\n\n<i>Например: {config.CITY}</i>",
-        reply_markup=kb.cancel_kb("courier_menu")
-    )
+    await message.answer(f"🏙 <b>Шаг 3/6:</b> Город\n\n<i>Например: {config.CITY}</i>",
+                         reply_markup=kb.cancel_kb("courier_menu"))
 
 
 @router.message(CourierReg.city)
@@ -174,24 +167,20 @@ async def reg_transport(call: CallbackQuery, state: FSMContext):
     names = {"auto": "Авто", "moto": "Мото", "bike": "Вело", "walk": "Пешком"}
     await state.update_data(transport=names.get(tr, tr))
     await state.set_state(CourierReg.card)
-    await call.message.edit_text(
-        "💳 <b>Шаг 5/6:</b> Номер карты (16 цифр)",
-        reply_markup=kb.cancel_kb("courier_menu")
-    )
+    await call.message.edit_text("💳 <b>Шаг 5/6:</b> Номер карты (16 цифр)",
+                                 reply_markup=kb.cancel_kb("courier_menu"))
     await call.answer()
 
 
 @router.message(CourierReg.card)
 async def reg_card(message: Message, state: FSMContext):
     if not helpers.is_valid_card(message.text):
-        await message.answer("❌ Неверный номер карты. Введите 16 цифр.")
+        await message.answer("❌ Неверный номер карты.")
         return
     await state.update_data(card=helpers.clean_phone(message.text))
     await state.set_state(CourierReg.referral)
     await message.answer(
-        "🎁 <b>Шаг 6/6:</b> Реферальный код\n\n"
-        "Если вас пригласил друг — введите его код (например, ref_12345).\n"
-        "Или отправьте /skip.",
+        "🎁 <b>Шаг 6/6:</b> Реферальный код\n\nВведите или /skip",
         reply_markup=kb.cancel_kb("courier_menu")
     )
 
@@ -211,13 +200,10 @@ async def reg_referral(message: Message, state: FSMContext):
     async with async_session() as session:
         courier = Courier(
             tg_id=message.from_user.id,
-            name=data["name"],
-            phone=data["phone"],
-            city=data["city"],
-            transport=data["transport"],
+            name=data["name"], phone=data["phone"],
+            city=data["city"], transport=data["transport"],
             card_number=data["card"],
-            status="pending",
-            courier_state="off",
+            status="pending", courier_state="off",
         )
         session.add(courier)
         await session.commit()
@@ -236,10 +222,7 @@ async def reg_referral(message: Message, state: FSMContext):
         await bot_admin.send_message(
             config.ADMIN_ID,
             f"🚴 <b>Новая заявка курьера</b>\n\n"
-            f"👤 {data['name']}\n"
-            f"📞 {data['phone']}\n"
-            f"🏙 {data['city']}\n"
-            f"🚗 {data['transport']}"
+            f"👤 {data['name']}\n📞 {data['phone']}\n🏙 {data['city']}\n🚗 {data['transport']}"
         )
     except Exception:
         pass
@@ -260,8 +243,7 @@ async def on_shift(call: CallbackQuery):
         await session.commit()
 
     await call.message.edit_text(
-        "🟢 <b>Вы на смене!</b>\n\n"
-        "Отправьте геолокацию (📍 скрепка → Геолокация), чтобы получать заказы.",
+        "🟢 <b>Вы на смене!</b>\n\nОтправьте гео (📍 скрепка), чтобы получать заказы.",
         reply_markup=kb.kb([[kb.btn("🔙 В меню", "courier_menu")]])
     )
     await call.answer()
@@ -273,13 +255,14 @@ async def got_geo(message: Message):
         courier = await get_courier(session, message.from_user.id)
         if not courier:
             return
-        courier.lat = message.location.latitude
-        courier.lon = message.location.longitude
-        courier.loc_time = datetime.now()
-        await session.commit()
+        await geo_service.update_courier_location(
+            session, courier.id,
+            message.location.latitude, message.location.longitude,
+        )
 
     await message.answer(
-        f"✅ Гео сохранено!\n📍 {message.location.latitude:.5f}, {message.location.longitude:.5f}",
+        f"✅ Гео сохранено!\n📍 {message.location.latitude:.5f}, {message.location.longitude:.5f}\n\n"
+        "🟢 Вы автоматически на смене!",
         reply_markup=kb.courier_main_on_shift()
     )
 
@@ -295,7 +278,7 @@ async def off_shift(call: CallbackQuery):
         await session.commit()
 
     await call.message.edit_text(
-        "🔴 <b>Вы ушли со смены.</b>\nЗаказы больше не приходят.",
+        "🔴 <b>Вы ушли со смены.</b>",
         reply_markup=kb.courier_main_off_shift()
     )
     await call.answer()
@@ -338,8 +321,7 @@ async def free_orders(call: CallbackQuery):
             if o.wait_started_at:
                 wait_min = int((datetime.now() - o.wait_started_at).total_seconds() / 60)
             items.append({
-                "id": o.id,
-                "fee": int(fee),
+                "id": o.id, "fee": int(fee),
                 "distance": f"{distance:.1f}",
                 "wait_min": wait_min,
                 "address": o.address,
@@ -355,8 +337,7 @@ async def free_orders(call: CallbackQuery):
                 )
             fee = float(d.courier_fee or 0)
             items.append({
-                "id": f"Д-{d.id}",
-                "fee": int(fee),
+                "id": f"Д-{d.id}", "fee": int(fee),
                 "distance": f"{distance:.1f}",
                 "wait_min": 0,
                 "address": d.to_address,
@@ -412,7 +393,7 @@ async def take_order(call: CallbackQuery):
 
         ok = await orders_service.take_order(session, order_id, courier.id)
         if not ok:
-            await call.answer("😔 Заказ уже занят", show_alert=True)
+            await call.answer("😔 Уже занят или вы не на смене", show_alert=True)
             return
 
         courier.courier_state = "busy"
@@ -509,10 +490,7 @@ async def take_delivery(call: CallbackQuery):
         shop = sr.scalar_one_or_none()
     if shop and shop.tg_id:
         try:
-            await bot_shop.send_message(
-                shop.tg_id,
-                f"🚴 Курьер {courier.name} взял доставку #Д-{delivery_id}"
-            )
+            await bot_shop.send_message(shop.tg_id, f"🚴 Курьер {courier.name} взял доставку #Д-{delivery_id}")
         except Exception:
             pass
 
@@ -531,14 +509,8 @@ async def picked(call: CallbackQuery):
         order = o_r.scalar_one_or_none()
         c_r = await session.execute(select(Client).where(Client.id == order.client_id))
         client = c_r.scalar_one_or_none()
-        s_r = await session.execute(select(Shop).where(Shop.id == order.shop_id))
-        shop = s_r.scalar_one_or_none()
 
-    text = (
-        f"📦 <b>Заказ #{order_id} забран.</b>\n\n"
-        f"Везём клиенту: {order.address}\n"
-        f"👤 {order.client_name}, {order.client_phone}"
-    )
+    text = f"📦 <b>Заказ #{order_id} забран.</b>\n\nВезём: {order.address}"
     rows = [
         [kb.btn("🏠 У клиента", f"courier_at_client_{order_id}")],
         [kb.btn("🗺 Маршрут", f"courier_map_{order_id}")],
@@ -591,8 +563,7 @@ async def done(call: CallbackQuery, state: FSMContext):
         await state.update_data(order_id=order_id, target_type="order")
         await state.set_state(CourierFSM.delivery_photo)
         await call.message.edit_text(
-            "📸 <b>ФОТО ОБЯЗАТЕЛЬНО</b>\n\n"
-            "Сфотографируйте момент передачи букета получателю.",
+            "📸 <b>ФОТО ОБЯЗАТЕЛЬНО</b>\n\nСфотографируйте момент передачи букета.",
             reply_markup=kb.kb([[kb.btn("❌ Отмена", "courier_menu")]])
         )
         await call.answer()
@@ -641,7 +612,7 @@ async def del_at_client(call: CallbackQuery):
         [kb.btn("🔙 В меню", "courier_menu")],
     ]
     await call.message.edit_text(
-        f"📍 <b>Доставка #Д-{delivery_id} у клиента.</b>\n\nПередали букет? Нажмите «Доставлено».",
+        f"📍 <b>Доставка #Д-{delivery_id} у клиента.</b>\n\nПередали букет?",
         reply_markup=kb.kb(rows)
     )
     await call.answer()
@@ -649,7 +620,6 @@ async def del_at_client(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("courier_del_done_"))
 async def del_done(call: CallbackQuery, state: FSMContext):
-    # ✅ ИСПРАВЛЕНО: [3] вместо [4]
     delivery_id = int(call.data.split("_")[3])
 
     async with async_session() as session:
@@ -664,7 +634,7 @@ async def del_done(call: CallbackQuery, state: FSMContext):
         await state.update_data(delivery_id=delivery_id, target_type="delivery")
         await state.set_state(CourierFSM.delivery_photo)
         await call.message.edit_text(
-            "📸 <b>ФОТО ОБЯЗАТЕЛЬНО</b>\n\nСфотографируйте момент передачи букета.",
+            "📸 <b>ФОТО ОБЯЗАТЕЛЬНО</b>\n\nСфотографируйте момент передачи.",
             reply_markup=kb.kb([[kb.btn("❌ Отмена", "courier_menu")]])
         )
         await call.answer()
@@ -691,6 +661,28 @@ async def receive_delivery_photo(message: Message, state: FSMContext):
             if order:
                 order.delivery_photo_id = photo_id
                 await session.commit()
+
+                # Админу
+                try:
+                    await bot_admin.send_photo(
+                        config.ADMIN_ID, photo_id,
+                        caption=f"📸 <b>Заказ #{order.id} доставлен</b>"
+                    )
+                except Exception:
+                    pass
+
+                # Магазину
+                s_r = await session.execute(select(Shop).where(Shop.id == order.shop_id))
+                shop = s_r.scalar_one_or_none()
+                if shop and shop.tg_id:
+                    try:
+                        await bot_shop.send_photo(
+                            shop.tg_id, photo_id,
+                            caption=f"📸 <b>Заказ #{order.id} доставлен</b>"
+                        )
+                    except Exception:
+                        pass
+
         await state.clear()
         await complete_delivery_order(message, obj_id, message.from_user.id)
     else:
@@ -700,6 +692,26 @@ async def receive_delivery_photo(message: Message, state: FSMContext):
             if d:
                 d.delivery_photo_id = photo_id
                 await session.commit()
+
+                try:
+                    await bot_admin.send_photo(
+                        config.ADMIN_ID, photo_id,
+                        caption=f"📸 <b>Доставка #Д-{d.id} выполнена</b>"
+                    )
+                except Exception:
+                    pass
+
+                s_r = await session.execute(select(Shop).where(Shop.id == d.shop_id))
+                shop = s_r.scalar_one_or_none()
+                if shop and shop.tg_id:
+                    try:
+                        await bot_shop.send_photo(
+                            shop.tg_id, photo_id,
+                            caption=f"📸 <b>Доставка #Д-{d.id} выполнена</b>"
+                        )
+                    except Exception:
+                        pass
+
         await state.clear()
         await complete_delivery_shop(message, obj_id, message.from_user.id)
 
@@ -710,7 +722,7 @@ async def wrong_photo(message: Message):
 
 
 # ═══════════════════════════════════════════
-#   ЗАВЕРШЕНИЕ ДОСТАВОК
+#   ЗАВЕРШЕНИЕ
 # ═══════════════════════════════════════════
 async def complete_delivery_order(message: Message, order_id: int, courier_tg_id: int):
     async with async_session() as session:
@@ -718,7 +730,7 @@ async def complete_delivery_order(message: Message, order_id: int, courier_tg_id
         order = await orders_service.complete_order(session, order_id)
 
         if not order or not courier:
-            await message.answer("❌ Ошибка при завершении.")
+            await message.answer("❌ Ошибка.")
             return
 
         fee = float(order.courier_fee or config.get_courier_fee(float(order.delivery_price)))
@@ -734,8 +746,7 @@ async def complete_delivery_order(message: Message, order_id: int, courier_tg_id
         client = c_r.scalar_one_or_none()
 
     await message.answer(
-        f"✅ <b>Заказ #{order_id} доставлен!</b>\n\n"
-        f"💰 +{int(fee)} ₽\n💳 Баланс: {helpers.money(courier.balance)}",
+        f"✅ <b>Заказ #{order_id} доставлен!</b>\n\n💰 +{int(fee)} ₽\n💳 Баланс: {helpers.money(courier.balance)}",
         reply_markup=kb.courier_main_on_shift()
     )
 
@@ -745,13 +756,13 @@ async def complete_delivery_order(message: Message, order_id: int, courier_tg_id
                 await bot_client.send_photo(
                     chat_id=client.tg_id,
                     photo=order.delivery_photo_id,
-                    caption=f"📸 <b>Заказ #{order_id} доставлен!</b>\n\nСпасибо, что выбрали SLIPI! 🌸",
+                    caption=f"📸 <b>Заказ #{order_id} доставлен!</b>\n\nСпасибо! 🌸",
                     reply_markup=kb.rating_kb("shop", order_id)
                 )
             else:
                 await bot_client.send_message(
                     client.tg_id,
-                    f"✅ <b>Заказ #{order_id} доставлен!</b>\n\nСпасибо! 🌸",
+                    f"✅ <b>Заказ #{order_id} доставлен!</b>",
                     reply_markup=kb.rating_kb("shop", order_id)
                 )
         except Exception:
@@ -784,14 +795,19 @@ async def complete_delivery_shop(message: Message, delivery_id: int, courier_tg_
         shop = s_r.scalar_one_or_none()
 
     await message.answer(
-        f"✅ <b>Доставка #Д-{delivery_id} выполнена!</b>\n\n"
-        f"💰 +{int(fee)} ₽\n💳 Баланс: {helpers.money(courier.balance)}",
+        f"✅ <b>Доставка #Д-{delivery_id} выполнена!</b>\n\n💰 +{int(fee)} ₽\n💳 Баланс: {helpers.money(courier.balance)}",
         reply_markup=kb.courier_main_on_shift()
     )
 
     if shop and shop.tg_id:
         try:
-            await bot_shop.send_message(shop.tg_id, f"✅ Доставка #Д-{delivery_id} выполнена!")
+            if d.delivery_photo_id:
+                await bot_shop.send_photo(
+                    shop.tg_id, d.delivery_photo_id,
+                    caption=f"✅ Доставка #Д-{delivery_id} выполнена!"
+                )
+            else:
+                await bot_shop.send_message(shop.tg_id, f"✅ Доставка #Д-{delivery_id} выполнена!")
         except Exception:
             pass
 
@@ -837,21 +853,36 @@ async def tx_history(call: CallbackQuery):
 
 
 @router.callback_query(F.data == "courier_withdraw")
-async def withdraw_start(call: CallbackQuery, state: FSMContext):
+async def withdraw_start(call: CallbackQuery):
     async with async_session() as session:
         courier = await get_courier(session, call.from_user.id)
         if float(courier.balance) < config.COURIER_MIN_WITHDRAW:
             await call.answer(f"Минимум {config.COURIER_MIN_WITHDRAW} ₽", show_alert=True)
             return
 
-    await state.set_state(CourierFSM.withdraw_amount)
     await call.message.edit_text(
         f"💸 <b>Вывод средств</b>\n\n"
         f"💰 Баланс: {helpers.money(courier.balance)}\n"
         f"💳 Минимум: {config.COURIER_MIN_WITHDRAW} ₽\n\n"
-        f"Введите сумму:",
-        reply_markup=kb.cancel_kb("courier_balance")
+        f"Выберите способ:",
+        reply_markup=kb.courier_withdraw_method()
     )
+    await call.answer()
+
+
+@router.callback_query(F.data == "cw_card")
+async def cw_card(call: CallbackQuery, state: FSMContext):
+    await state.set_state(CourierFSM.withdraw_amount)
+    await state.update_data(method="card")
+    await call.message.edit_text("💳 Введите сумму:", reply_markup=kb.cancel_kb("courier_balance"))
+    await call.answer()
+
+
+@router.callback_query(F.data == "cw_sbp")
+async def cw_sbp(call: CallbackQuery, state: FSMContext):
+    await state.set_state(CourierFSM.withdraw_amount)
+    await state.update_data(method="sbp")
+    await call.message.edit_text("📱 Введите сумму:", reply_markup=kb.cancel_kb("courier_balance"))
     await call.answer()
 
 
@@ -869,21 +900,25 @@ async def process_withdraw(message: Message, state: FSMContext):
             await message.answer(f"❌ Минимум {config.COURIER_MIN_WITHDRAW} ₽")
             return
         if amount > courier.balance:
-            await message.answer(f"❌ Больше баланса. У вас {helpers.money(courier.balance)}")
+            await message.answer("❌ Больше баланса.")
             return
+
+        data = await state.get_data()
+        method = data.get("method", "card")
 
         await payments_service.create_payout(
             session=session,
-            user_type="courier",
-            user_id=courier.id,
-            amount=amount,
+            user_type="courier", user_id=courier.id,
+            amount=amount, method=method,
             card_number=courier.card_number,
-            holder_name=courier.name,
+            bank_name=courier.bank_name,
+            card_holder=courier.card_holder,
+            sbp_phone=courier.sbp_phone,
         )
 
     await state.clear()
     await message.answer(
-        f"✅ Заявка на вывод {helpers.money(amount)} отправлена админу.",
+        f"✅ Заявка на вывод {helpers.money(amount)} отправлена.",
         reply_markup=kb.courier_main_on_shift()
     )
 
@@ -893,21 +928,58 @@ async def process_withdraw(message: Message, state: FSMContext):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_stats")
 async def courier_stats(call: CallbackQuery):
+    await call.message.edit_text(
+        "📊 <b>Статистика</b>\n\nВыберите период:",
+        reply_markup=kb.courier_stats_menu()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("courier_stats_") & ~F.data.startswith("courier_stats_menu"))
+async def courier_stats_period(call: CallbackQuery):
+    period = call.data.replace("courier_stats_", "")
+    now = datetime.now()
+    if period == "today":
+        since = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        label = "Сегодня"
+    elif period == "week":
+        since = now - timedelta(days=7)
+        label = "За неделю"
+    elif period == "month":
+        since = now - timedelta(days=30)
+        label = "За месяц"
+    else:
+        since = datetime(2020, 1, 1)
+        label = "За всё время"
+
     async with async_session() as session:
         courier = await get_courier(session, call.from_user.id)
+        if not courier:
+            await call.answer("Ошибка", show_alert=True)
+            return
+
+        r = await session.execute(
+            select(Order).where(
+                Order.courier_id == courier.id,
+                Order.created_at >= since,
+                Order.status == "done",
+            )
+        )
+        done_orders = r.scalars().all()
+
         level_info = bonuses_service.get_level_by_orders(courier.total_orders)
         next_level = bonuses_service.get_next_level(courier.total_orders)
         bonus = await bonuses_service.calculate_daily_bonus(session, courier.id)
 
+    earned = sum(float(o.courier_fee or 0) for o in done_orders)
+
     text = (
-        f"📊 <b>Статистика</b>\n\n"
-        f"📦 Всего доставок: {courier.total_orders}\n"
-        f"⭐ Рейтинг: {float(courier.rating or 0):.1f}\n"
-        f"💰 Баланс: {helpers.money(courier.balance)}\n\n"
+        f"📊 <b>Статистика — {label}</b>\n\n"
+        f"📦 Доставок: {len(done_orders)}\n"
+        f"💰 Заработано: {helpers.money(earned)}\n"
+        f"⭐ Рейтинг: {float(courier.rating or 0):.1f}\n\n"
         f"{level_info[1]}"
     )
-    if len(level_info) > 3 and level_info[3] > 0:
-        text += f" (+{level_info[3]}% к заработку)"
     if next_level:
         text += f"\nДо {next_level[1]}: {next_level[2] - courier.total_orders} заказов"
     if bonus > 0:
@@ -955,6 +1027,102 @@ async def ref_copy(call: CallbackQuery):
     link = helpers.referral_link(call.from_user.id)
     await call.message.answer(f"<code>{link}</code>")
     await call.answer("Скопировано")
+
+
+# ═══════════════════════════════════════════
+#   РЕКВИЗИТЫ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "courier_requisites")
+async def courier_requisites(call: CallbackQuery):
+    async with async_session() as session:
+        courier = await get_courier(session, call.from_user.id)
+    if not courier:
+        await call.answer("Ошибка", show_alert=True)
+        return
+
+    text = (
+        f"💳 <b>Реквизиты для выплат</b>\n\n"
+        f"💳 Карта: {helpers.format_card(courier.card_number or '—')}\n"
+        f"🏦 Банк: {courier.bank_name or '—'}\n"
+        f"👤 ФИО: {courier.card_holder or '—'}\n"
+        f"📱 СБП: {courier.sbp_phone or '—'}"
+    )
+    await call.message.edit_text(text, reply_markup=kb.courier_requisites_menu())
+    await call.answer()
+
+
+@router.callback_query(F.data == "courier_req_card")
+async def cr_card(call: CallbackQuery, state: FSMContext):
+    await state.set_state(CourierFSM.req_card)
+    await call.message.edit_text("💳 Номер карты (16 цифр):", reply_markup=kb.cancel_kb("courier_requisites"))
+    await call.answer()
+
+
+@router.message(CourierFSM.req_card)
+async def cr_card_save(message: Message, state: FSMContext):
+    if not helpers.is_valid_card(message.text):
+        await message.answer("❌ Неверный номер.")
+        return
+    async with async_session() as session:
+        courier = await get_courier(session, message.from_user.id)
+        courier.card_number = helpers.clean_phone(message.text)
+        await session.commit()
+    await state.clear()
+    await message.answer("✅ Карта сохранена.", reply_markup=kb.courier_menu())
+
+
+@router.callback_query(F.data == "courier_req_bank")
+async def cr_bank(call: CallbackQuery):
+    await call.message.edit_text("🏦 Выберите банк:", reply_markup=kb.courier_banks_kb())
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("cour_bank_"))
+async def cr_bank_save(call: CallbackQuery):
+    bank = call.data.replace("cour_bank_", "")
+    async with async_session() as session:
+        courier = await get_courier(session, call.from_user.id)
+        courier.bank_name = bank
+        await session.commit()
+    await call.answer(f"✅ {bank}", show_alert=True)
+    await courier_requisites(call)
+
+
+@router.callback_query(F.data == "courier_req_holder")
+async def cr_holder(call: CallbackQuery, state: FSMContext):
+    await state.set_state(CourierFSM.req_holder)
+    await call.message.edit_text("👤 ФИО владельца карты:", reply_markup=kb.cancel_kb("courier_requisites"))
+    await call.answer()
+
+
+@router.message(CourierFSM.req_holder)
+async def cr_holder_save(message: Message, state: FSMContext):
+    async with async_session() as session:
+        courier = await get_courier(session, message.from_user.id)
+        courier.card_holder = message.text.strip()
+        await session.commit()
+    await state.clear()
+    await message.answer("✅ ФИО сохранено.", reply_markup=kb.courier_main_on_shift())
+
+
+@router.callback_query(F.data == "courier_req_sbp")
+async def cr_sbp(call: CallbackQuery, state: FSMContext):
+    await state.set_state(CourierFSM.req_sbp)
+    await call.message.edit_text("📱 Телефон для СБП:", reply_markup=kb.cancel_kb("courier_requisites"))
+    await call.answer()
+
+
+@router.message(CourierFSM.req_sbp)
+async def cr_sbp_save(message: Message, state: FSMContext):
+    if not helpers.is_valid_phone(message.text):
+        await message.answer("❌ Неверный номер.")
+        return
+    async with async_session() as session:
+        courier = await get_courier(session, message.from_user.id)
+        courier.sbp_phone = helpers.clean_phone(message.text)
+        await session.commit()
+    await state.clear()
+    await message.answer("✅ СБП сохранён.", reply_markup=kb.courier_main_on_shift())
 
 
 # ═══════════════════════════════════════════
@@ -1006,7 +1174,7 @@ async def view_active_order(call: CallbackQuery):
         shop = shop_r.scalar_one_or_none()
 
     if not order:
-        await call.answer("Заказ не найден", show_alert=True)
+        await call.answer("Не найден", show_alert=True)
         return
 
     text = (
@@ -1042,8 +1210,8 @@ async def view_active_delivery(call: CallbackQuery):
 
     text = (
         f"🚚 <b>Доставка #Д-{d.id}</b>\n\n"
-        f"🏪 Откуда: {d.from_address}\n"
-        f"🏠 Куда: {d.to_address}\n"
+        f"🏪 {d.from_address}\n"
+        f"🏠 {d.to_address}\n"
         f"👤 {d.client_name}, {d.client_phone}"
     )
     rows = []
