@@ -28,11 +28,12 @@ def cancel_kb(to: str = "client_main"):
 
 
 # ═══════════════════════════════════════════
-#   КЛИЕНТ
+#   КЛИЕНТ — ГЛАВНОЕ
 # ═══════════════════════════════════════════
 def client_main():
     return kb([
         [btn("🛍 Каталог", "client_catalog")],
+        [btn("🛒 Корзина", "client_cart")],
         [btn("📦 Мои заказы", "client_orders"),
          btn("❤️ Избранное", "client_favorites")],
         [btn("📅 Мои события", "client_events"),
@@ -70,12 +71,14 @@ def client_shops(shops: list, page: int = 0):
     return builder.as_markup()
 
 
-def shop_card(shop_id: int):
+def shop_card(shop_id: int, is_subscribed: bool = False):
+    sub = "💔 Отписаться" if is_subscribed else "❤️ Подписаться"
     return kb([
         [btn("💐 Товары", f"shop_products_{shop_id}")],
-        [btn("🔥 Хиты", f"shop_hits_{shop_id}")],
-        [btn("⭐ Отзывы", f"shop_reviews_{shop_id}")],
+        [btn("🔥 Хиты", f"shop_hits_{shop_id}"),
+         btn("⭐ Отзывы", f"shop_reviews_{shop_id}")],
         [btn("📞 Позвонить", f"shop_call_{shop_id}")],
+        [btn(sub, f"shop_subscribe_{shop_id}")],
         [btn("🔙 К магазинам", "client_catalog")],
     ])
 
@@ -105,11 +108,12 @@ def products_list(shop_id: int, category: str, products: list, page: int = 0):
 
 
 def product_card(product_id: int, in_fav: bool = False):
-    fav_text = "💔 Убрать" if in_fav else "❤️ В избранное"
+    fav = "💔 Убрать" if in_fav else "❤️ В избранное"
     return kb([
         [btn("🛒 В корзину", f"cart_add_{product_id}")],
-        [btn(fav_text, f"fav_toggle_{product_id}")],
-        [btn("🔙 К списку", "back_to_products")],
+        [btn(fav, f"fav_toggle_{product_id}")],
+        [btn("🛒 Моя корзина", "client_cart")],
+        [btn("🔙 В каталог", "client_catalog")],
     ])
 
 
@@ -171,10 +175,8 @@ def order_addresses(addresses: list):
 
 def order_save_address():
     return kb([
-        [btn("🏠 Дом", "save_addr_Дом"),
-         btn("🏢 Работа", "save_addr_Работа")],
-        [btn("❤️ Любимый", "save_addr_Любимый"),
-         btn("✏️ Своё", "save_addr_custom")],
+        [btn("🏠 Дом", "save_addr_Дом"), btn("🏢 Работа", "save_addr_Работа")],
+        [btn("❤️ Любимый", "save_addr_Любимый"), btn("✏️ Своё", "save_addr_custom")],
         [btn("⏭ Не сохранять", "save_addr_no")],
     ])
 
@@ -236,7 +238,7 @@ def order_payment():
 
 
 # ═══════════════════════════════════════════
-#   ТРЕКИНГ
+#   ТРЕКИНГ ЗАКАЗА
 # ═══════════════════════════════════════════
 def track_order(order_id: int, status: str, courier_phone: str = None,
                 lat: float = None, lon: float = None):
@@ -250,6 +252,7 @@ def track_order(order_id: int, status: str, courier_phone: str = None,
     if status == "pending":
         rows.append([btn("❌ Отменить заказ", f"track_cancel_{order_id}")])
     if status in ("pending", "wait"):
+        rows.append([btn("✏️ Изменить заказ", f"track_edit_{order_id}")])
         rows.append([btn("💬 Написать магазину", f"chat_shop_{order_id}")])
     rows.append([btn("🔄 Обновить", f"track_refresh_{order_id}")])
     rows.append([btn("🆘 Проблема", f"track_problem_{order_id}")])
@@ -261,6 +264,18 @@ def cancel_confirm(order_id: int):
     return kb([
         [btn("✅ Да, отменить", f"track_cancel_yes_{order_id}")],
         [btn("❌ Нет, оставить", f"track_refresh_{order_id}")],
+    ])
+
+
+# Редактирование заказа
+def order_edit_menu(order_id: int):
+    return kb([
+        [btn("📍 Адрес", f"oe_addr_{order_id}")],
+        [btn("👤 Имя получателя", f"oe_name_{order_id}")],
+        [btn("📞 Телефон", f"oe_phone_{order_id}")],
+        [btn("🕒 Время", f"oe_time_{order_id}")],
+        [btn("💬 Комментарий", f"oe_comment_{order_id}")],
+        [btn("🔙 Назад", f"track_refresh_{order_id}")],
     ])
 
 
@@ -283,7 +298,22 @@ def skip_comment():
 
 
 # ═══════════════════════════════════════════
-#   БАЛАНС / ИЗБРАННОЕ / СОБЫТИЯ КЛИЕНТА
+#   МОИ ЗАКАЗЫ
+# ═══════════════════════════════════════════
+def orders_list(orders: list):
+    rows = []
+    for o in orders[:10]:
+        em = config.STATUS_EMOJI.get(o["status"], "❓")
+        if o.get("can_rate"):
+            rows.append([btn(f"{em} #{o['id']} — {o['price']} — ⭐ Оценить", f"rate_start_{o['id']}")])
+        else:
+            rows.append([btn(f"{em} #{o['id']} — {o['price']}", f"track_refresh_{o['id']}")])
+    rows.append([btn("🔙 Назад", "client_main")])
+    return kb(rows)
+
+
+# ═══════════════════════════════════════════
+#   БАЛАНС
 # ═══════════════════════════════════════════
 def client_balance():
     return kb([
@@ -294,6 +324,17 @@ def client_balance():
     ])
 
 
+def withdraw_method():
+    return kb([
+        [btn("💳 На карту", "wd_card")],
+        [btn("📱 По СБП", "wd_sbp")],
+        [btn("❌ Отмена", "client_balance")],
+    ])
+
+
+# ═══════════════════════════════════════════
+#   ИЗБРАННОЕ
+# ═══════════════════════════════════════════
 def favorites_list(items: list):
     rows = []
     for i, p in enumerate(items, start=1):
@@ -302,6 +343,9 @@ def favorites_list(items: list):
     return kb(rows)
 
 
+# ═══════════════════════════════════════════
+#   СОБЫТИЯ
+# ═══════════════════════════════════════════
 def events_menu():
     return kb([
         [btn("➕ Добавить событие", "event_add")],
@@ -311,10 +355,8 @@ def events_menu():
 
 def event_whom():
     return kb([
-        [btn("👩 Мама", "event_whom_Мама"),
-         btn("👨 Папа", "event_whom_Папа")],
-        [btn("💑 Любимая", "event_whom_Любимая"),
-         btn("👶 Ребёнок", "event_whom_Ребёнок")],
+        [btn("👩 Мама", "event_whom_Мама"), btn("👨 Папа", "event_whom_Папа")],
+        [btn("💑 Любимая", "event_whom_Любимая"), btn("👶 Ребёнок", "event_whom_Ребёнок")],
         [btn("✏️ Своё", "event_whom_custom")],
         [btn("❌ Отмена", "client_main")],
     ])
@@ -341,7 +383,7 @@ def shop_main():
         [btn("📋 Новые заказы", "shop_new_orders")],
         [btn("🚚 Создать доставку", "shop_create_delivery")],
         [btn("📋 Мои доставки", "shop_my_deliveries")],
-        [btn("📊 Статистика и финансы", "shop_stats")],
+        [btn("📊 Статистика", "shop_stats")],
         [btn("⚙️ Настройки", "shop_settings")],
         [btn("🆘 Поддержка", "shop_support")],
     ])
@@ -354,6 +396,7 @@ def shop_back(to: str = "shop_main"):
 def shop_products_menu():
     return kb([
         [btn("➕ Добавить товар", "shop_add_product")],
+        [btn("✏️ Изменить цены на %", "shop_mass_price")],
         [btn("🔙 Назад", "shop_main")],
     ])
 
@@ -361,57 +404,97 @@ def shop_products_menu():
 def shop_products_list(products: list):
     rows = []
     for p in products:
-        status = "✅" if p["is_active"] else "⏸"
+        status = "📝" if p.get("is_draft") else ("✅" if p["is_active"] else "⏸")
         rows.append([btn(f"{status} {p['title']} — {p['price']}", f"shop_prod_view_{p['id']}")])
     rows.append([btn("➕ Добавить товар", "shop_add_product")])
+    rows.append([btn("✏️ Изменить цены на %", "shop_mass_price")])
     rows.append([btn("🔙 Назад", "shop_main")])
     return kb(rows)
 
 
-def shop_product_manage(product_id: int, is_active: bool = True):
+def shop_product_manage(product_id: int, is_active: bool = True, is_draft: bool = False):
     toggle = "⏸ Скрыть" if is_active else "▶️ Показать"
-    return kb([
+    rows = [
         [btn("✏️ Изменить цену", f"shop_edit_price_{product_id}")],
         [btn("📸 Изменить фото", f"shop_edit_photo_{product_id}")],
         [btn(toggle, f"shop_toggle_{product_id}")],
-        [btn("🗑 Удалить", f"shop_delete_{product_id}")],
-        [btn("🔙 Назад", "shop_my_products")],
+    ]
+    if is_draft:
+        rows.append([btn("📤 Опубликовать", f"shop_publish_{product_id}")])
+    rows.append([btn("🗑 Удалить", f"shop_delete_{product_id}")])
+    rows.append([btn("🔙 Назад", "shop_my_products")])
+    return kb(rows)
+
+
+def shop_mass_price_confirm():
+    return kb([
+        [btn("✅ Применить", "shop_mass_apply")],
+        [btn("❌ Отмена", "shop_main")],
     ])
 
 
+# ═══════════════════════════════════════════
+#   МАГАЗИН — НАСТРОЙКИ
+# ═══════════════════════════════════════════
 def shop_settings_menu():
     return kb([
         [btn("✏️ Название", "shop_set_name")],
         [btn("✏️ Адрес", "shop_set_address")],
         [btn("✏️ Телефон", "shop_set_phone")],
         [btn("📍 Обновить гео", "shop_set_geo")],
-        [btn("⏰ Часы работы", "shop_work_hours")],
+        [btn("📅 График работы", "shop_schedule")],
+        [btn("💳 Реквизиты", "shop_requisites")],
         [btn("⏸ Приостановить", "shop_pause")],
         [btn("🔙 Назад", "shop_main")],
     ])
 
 
-def shop_work_hours_menu():
+def shop_schedule_menu(schedule: dict):
+    rows = []
+    for key, day in config.WEEKDAYS.items():
+        time_str = schedule.get(key, "выходной")
+        rows.append([btn(f"{day}: {time_str}", f"shop_sched_{key}")])
+    rows.append([btn("💾 Готово", "shop_main")])
+    return kb(rows)
+
+
+def shop_schedule_day(day_key: str):
     return kb([
-        [btn("✏️ Открытие", "shop_set_open")],
-        [btn("✏️ Закрытие", "shop_set_close")],
+        [btn("✏️ Открытие", f"shop_sched_open_{day_key}")],
+        [btn("✏️ Закрытие", f"shop_sched_close_{day_key}")],
+        [btn("🚫 Выходной", f"shop_sched_off_{day_key}")],
+        [btn("🔙 Назад", "shop_schedule")],
+    ])
+
+
+def shop_requisites_menu():
+    return kb([
+        [btn("💳 Карта", "shop_req_card")],
+        [btn("🏦 Банк", "shop_req_bank")],
+        [btn("👤 ФИО владельца", "shop_req_holder")],
+        [btn("📱 СБП", "shop_req_sbp")],
         [btn("🔙 Назад", "shop_settings")],
     ])
 
 
-def shop_stats_menu():
+def banks_kb(prefix: str = "bank"):
+    rows = []
+    for bank in config.BANKS:
+        rows.append([btn(bank, f"{prefix}_{bank}")])
+    rows.append([btn("🔙 Назад", "shop_requisites")])
+    return kb(rows)
+
+
+def shop_paused_menu():
     return kb([
-        [btn("📥 Запросить выплату", "shop_request_payout")],
-        [btn("🔙 Назад", "shop_main")],
+        [btn("▶️ Возобновить", "shop_resume")],
+        [btn("🆘 Поддержка", "shop_support")],
     ])
 
 
-def shop_support():
-    return kb([
-        [btn("🔙 Назад", "shop_main")],
-    ])
-
-
+# ═══════════════════════════════════════════
+#   МАГАЗИН — КАТЕГОРИИ
+# ═══════════════════════════════════════════
 def shop_categories_menu():
     return kb([
         [btn("➕ Добавить категорию", "shop_cat_add")],
@@ -438,6 +521,16 @@ def shop_categories_remove(active_cats: list):
     return kb(rows)
 
 
+# ═══════════════════════════════════════════
+#   МАГАЗИН — ЗАКАЗЫ
+# ═══════════════════════════════════════════
+def shop_order_new(order_id: int):
+    return kb([
+        [btn("✅ Принять", f"shop_accept_{order_id}")],
+        [btn("❌ Отклонить", f"shop_reject_{order_id}")],
+    ])
+
+
 def shop_reject_reasons(order_id: int):
     return kb([
         [btn("💐 Нет в наличии", f"shop_reject_reason_{order_id}_out_of_stock")],
@@ -448,17 +541,37 @@ def shop_reject_reasons(order_id: int):
     ])
 
 
-def shop_order_new(order_id: int):
+def shop_order_manage(order_id: int):
     return kb([
-        [btn("✅ Принять", f"shop_accept_{order_id}")],
-        [btn("❌ Отклонить", f"shop_reject_{order_id}")],
+        [btn("✏️ Изменить заказ", f"shop_edit_order_{order_id}")],
+        [btn("🔄 Обновить", f"shop_view_order_{order_id}")],
+        [btn("🔙 Назад", "shop_new_orders")],
     ])
 
 
-def shop_paused_menu():
+def shop_order_edit_menu(order_id: int):
     return kb([
-        [btn("▶️ Возобновить", "shop_resume")],
-        [btn("🆘 Поддержка", "shop_support")],
+        [btn("📍 Адрес", f"soe_addr_{order_id}")],
+        [btn("👤 Имя получателя", f"soe_name_{order_id}")],
+        [btn("📞 Телефон", f"soe_phone_{order_id}")],
+        [btn("🕒 Время", f"soe_time_{order_id}")],
+        [btn("💬 Комментарий", f"soe_comment_{order_id}")],
+        [btn("🔙 Назад", f"shop_view_order_{order_id}")],
+    ])
+
+
+# ═══════════════════════════════════════════
+#   МАГАЗИН — СТАТИСТИКА
+# ═══════════════════════════════════════════
+def shop_stats_menu():
+    return kb([
+        [btn("📅 Сегодня", "shop_stats_today")],
+        [btn("📅 Неделя", "shop_stats_week")],
+        [btn("📅 Месяц", "shop_stats_month")],
+        [btn("📅 Всё время", "shop_stats_all")],
+        [btn("📥 Запросить выплату", "shop_request_payout")],
+        [btn("📊 Экспорт CSV", "shop_export_csv")],
+        [btn("🔙 Назад", "shop_main")],
     ])
 
 
@@ -502,9 +615,16 @@ def shop_delivery_photo():
     ])
 
 
-def shop_delivery_comment_skip():
+def shop_delivery_shop_comment_skip():
     return kb([
-        [btn("⏭ Пропустить", "shop_del_comment_skip")],
+        [btn("⏭ Пропустить", "shop_del_shopcomm_skip")],
+        [btn("❌ Отмена", "shop_main")],
+    ])
+
+
+def shop_delivery_client_comment_skip():
+    return kb([
+        [btn("⏭ Пропустить", "shop_del_clientcomm_skip")],
         [btn("❌ Отмена", "shop_main")],
     ])
 
@@ -531,36 +651,38 @@ def shop_delivery_payment(delivery_id: int):
     ])
 
 
-def shop_my_deliveries(deliveries: list, page: int = 0):
+def shop_my_deliveries(deliveries: list):
     rows = []
     for d in deliveries:
-        status_emoji = {
-            "pending": "⏸",
-            "paid": "💳",
-            "confirmed": "✅",
-            "going": "🚴",
-            "picked": "📦",
-            "at_client": "📍",
-            "done": "✅",
-            "cancel": "❌",
+        em = {
+            "pending": "⏸", "paid": "💳", "confirmed": "✅",
+            "going": "🚴", "picked": "📦", "at_client": "📍",
+            "done": "✅", "cancel": "❌",
         }.get(d["status"], "❓")
-        rows.append([btn(
-            f"{status_emoji} #Д-{d['id']} — {d['to_address'][:25]}",
-            f"shop_del_view_{d['id']}"
-        )])
+        rows.append([btn(f"{em} #Д-{d['id']} — {d['to_address'][:25]}", f"shop_del_view_{d['id']}")])
     rows.append([btn("🚚 Создать новую", "shop_create_delivery")])
     rows.append([btn("🔙 Назад", "shop_main")])
     return kb(rows)
 
 
 def shop_delivery_view(delivery_id: int, can_cancel: bool = False):
-    rows = [
-        [btn("🔄 Обновить", f"shop_del_view_{delivery_id}")],
-    ]
+    rows = [[btn("✏️ Изменить", f"shop_del_edit_{delivery_id}")]]
     if can_cancel:
-        rows.append([btn("❌ Отменить доставку", f"shop_del_cancel_{delivery_id}")])
+        rows.append([btn("❌ Отменить", f"shop_del_cancel_{delivery_id}")])
     rows.append([btn("🔙 Назад", "shop_my_deliveries")])
     return kb(rows)
+
+
+def shop_delivery_edit_menu(delivery_id: int):
+    return kb([
+        [btn("📍 Адрес", f"sde_addr_{delivery_id}")],
+        [btn("👤 Имя получателя", f"sde_name_{delivery_id}")],
+        [btn("📞 Телефон", f"sde_phone_{delivery_id}")],
+        [btn("🕒 Время", f"sde_time_{delivery_id}")],
+        [btn("💬 Комментарий магазина", f"sde_shopcomm_{delivery_id}")],
+        [btn("💬 Комментарий клиента", f"sde_clientcomm_{delivery_id}")],
+        [btn("🔙 Назад", f"shop_del_view_{delivery_id}")],
+    ])
 
 
 # ═══════════════════════════════════════════
@@ -570,10 +692,10 @@ def courier_main_on_shift():
     return kb([
         [btn("📦 Свободные заказы", "courier_free_orders")],
         [btn("🚗 Мои активные", "courier_my_orders")],
-        [btn("💰 Баланс и вывод", "courier_balance"),
-         btn("📊 Статистика", "courier_stats")],
+        [btn("💰 Баланс и вывод", "courier_balance"), btn("📊 Статистика", "courier_stats")],
         [btn("🎁 Рефералка", "courier_referral")],
         [btn("🏆 Достижения", "courier_achievements")],
+        [btn("💳 Реквизиты", "courier_requisites")],
         [btn("🆘 Поддержка", "courier_support")],
         [btn("🔴 Уйти со смены", "courier_off_shift")],
     ])
@@ -582,10 +704,10 @@ def courier_main_on_shift():
 def courier_main_off_shift():
     return kb([
         [btn("🟢 Выйти на смену", "courier_on_shift")],
-        [btn("💰 Баланс и вывод", "courier_balance"),
-         btn("📊 Статистика", "courier_stats")],
+        [btn("💰 Баланс и вывод", "courier_balance"), btn("📊 Статистика", "courier_stats")],
         [btn("🎁 Рефералка", "courier_referral")],
         [btn("🏆 Достижения", "courier_achievements")],
+        [btn("💳 Реквизиты", "courier_requisites")],
         [btn("🆘 Поддержка", "courier_support")],
     ])
 
@@ -594,22 +716,20 @@ def courier_back(to: str = "courier_menu"):
     return kb([[btn("🔙 Назад", to)]])
 
 
+def courier_support():
+    return kb([[btn("🔙 Назад", "courier_menu")]])
+
+
 def courier_free_orders_list(orders: list, page: int = 0):
     rows = []
     for o in orders:
         emoji = "🔥" if o["wait_min"] < 5 else ("🟢" if o["wait_min"] < 10 else "🟡")
+        prefix = "🚚" if o["type"] == "delivery" else emoji
         rows.append([btn(
-            f"{emoji} #{o['id']} — {o['fee']}₽ — {o['distance']}км",
+            f"{prefix} {o['id']} — {o['fee']}₽ — {o['distance']}км",
             f"courier_order_{o['id']}"
         )])
-    nav = []
-    if page > 0:
-        nav.append(btn("⬅️", f"courier_page_{page - 1}"))
-    nav.append(btn("🔄", "courier_free_orders"))
-    if len(orders) == 3:
-        nav.append(btn("➡️", f"courier_page_{page + 1}"))
-    if nav:
-        rows.append(nav)
+    rows.append([btn("🔄 Обновить", "courier_free_orders")])
     rows.append([btn("🔙 В меню", "courier_menu")])
     return kb(rows)
 
@@ -623,8 +743,6 @@ def courier_active_order(order_id: int, status: str):
     elif status == "at_client":
         rows.append([btn("✅ Доставлено", f"courier_done_{order_id}")])
     rows.append([btn("🗺 Маршрут", f"courier_map_{order_id}")])
-    rows.append([btn("📞 Позвонить", f"courier_call_{order_id}")])
-    rows.append([btn("💬 Написать", f"courier_chat_{order_id}")])
     rows.append([btn("🆘 Проблема", f"courier_problem_{order_id}")])
     rows.append([btn("🔙 Назад", "courier_my_orders")])
     return kb(rows)
@@ -632,14 +750,26 @@ def courier_active_order(order_id: int, status: str):
 
 def courier_balance_menu():
     return kb([
-        [btn("💸 Вывести на карту", "courier_withdraw")],
+        [btn("💸 Вывести", "courier_withdraw")],
         [btn("📜 История", "courier_tx_history")],
         [btn("🔙 Назад", "courier_menu")],
     ])
 
 
+def courier_withdraw_method():
+    return kb([
+        [btn("💳 На карту", "cw_card")],
+        [btn("📱 По СБП", "cw_sbp")],
+        [btn("❌ Отмена", "courier_balance")],
+    ])
+
+
 def courier_stats_menu():
     return kb([
+        [btn("📅 Сегодня", "courier_stats_today")],
+        [btn("📅 Неделя", "courier_stats_week")],
+        [btn("📅 Месяц", "courier_stats_month")],
+        [btn("📅 Всё время", "courier_stats_all")],
         [btn("🏆 Достижения", "courier_achievements")],
         [btn("🔙 Назад", "courier_menu")],
     ])
@@ -653,30 +783,57 @@ def courier_referral_menu(ref_link: str):
     ])
 
 
-def courier_support():
-    return kb([[btn("🔙 Назад", "courier_menu")]])
+def courier_requisites_menu():
+    return kb([
+        [btn("💳 Карта", "courier_req_card")],
+        [btn("🏦 Банк", "courier_req_bank")],
+        [btn("👤 ФИО владельца", "courier_req_holder")],
+        [btn("📱 СБП", "courier_req_sbp")],
+        [btn("🔙 Назад", "courier_menu")],
+    ])
+
+
+def courier_banks_kb():
+    rows = []
+    for bank in config.BANKS:
+        rows.append([btn(bank, f"cour_bank_{bank}")])
+    rows.append([btn("🔙 Назад", "courier_requisites")])
+    return kb(rows)
 
 
 # ═══════════════════════════════════════════
 #   АДМИН — ГЛАВНОЕ
 # ═══════════════════════════════════════════
-def admin_main():
-    return kb([
-        [btn("📨 Заявки", "admin_requests")],
-        [btn("🏪 Магазины", "admin_shops"),
-         btn("🚴 Курьеры", "admin_couriers")],
-        [btn("🚚 Доставки", "admin_deliveries"),
-         btn("💳 Переводы", "admin_payments")],
-        [btn("💰 Финансы", "admin_finance")],
-        [btn("⏰ Зависшие заказы", "admin_stuck_orders")],
-        [btn("🎁 Промокоды", "admin_promos"),
-         btn("🆘 Жалобы", "admin_complaints")],
-        [btn("📢 Рассылка", "admin_broadcast")],
-        [btn("📊 Аналитика", "admin_analytics"),
-         btn("⚙️ Настройки", "admin_settings")],
-        [btn("🔒 Доступ", "admin_access"),
-         btn("📜 Логи", "admin_logs")],
-    ])
+def admin_main(permissions: dict | None = None):
+    """Главное меню админа. Если permissions None — показываем всё (главный)."""
+    if permissions is None:
+        permissions = {k: True for k in config.ADMIN_PERMISSIONS.keys()}
+
+    rows = []
+    if permissions.get("requests"):
+        rows.append([btn("📨 Заявки", "admin_requests")])
+    if permissions.get("shops") and permissions.get("couriers"):
+        rows.append([btn("🏪 Магазины", "admin_shops"), btn("🚴 Курьеры", "admin_couriers")])
+    elif permissions.get("shops"):
+        rows.append([btn("🏪 Магазины", "admin_shops")])
+    elif permissions.get("couriers"):
+        rows.append([btn("🚴 Курьеры", "admin_couriers")])
+    if permissions.get("payments") and permissions.get("finance"):
+        rows.append([btn("🚚 Доставки", "admin_deliveries"), btn("💳 Переводы", "admin_payments")])
+        rows.append([btn("💰 Финансы", "admin_finance")])
+    elif permissions.get("payments"):
+        rows.append([btn("🚚 Доставки", "admin_deliveries"), btn("💳 Переводы", "admin_payments")])
+    elif permissions.get("finance"):
+        rows.append([btn("💰 Финансы", "admin_finance")])
+    rows.append([btn("⏰ Зависшие заказы", "admin_stuck_orders")])
+    if permissions.get("settings"):
+        rows.append([btn("🎁 Промокоды", "admin_promos"), btn("🆘 Жалобы", "admin_complaints")])
+        rows.append([btn("📢 Рассылка", "admin_broadcast")])
+        rows.append([btn("📊 Аналитика", "admin_analytics"), btn("⚙️ Настройки", "admin_settings")])
+    if permissions.get("admins"):
+        rows.append([btn("🔑 Админы", "admin_admins")])
+    rows.append([btn("📜 Логи", "admin_logs")])
+    return kb(rows)
 
 
 def admin_back(to: str = "admin_main"):
@@ -687,6 +844,9 @@ def admin_cancel():
     return kb([[btn("❌ Отмена", "admin_main")]])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — ЗАЯВКИ
+# ═══════════════════════════════════════════
 def admin_requests_menu():
     return kb([
         [btn("🏪 Магазины", "admin_req_shops")],
@@ -709,6 +869,9 @@ def admin_approve_courier(courier_id: int):
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — МАГАЗИНЫ
+# ═══════════════════════════════════════════
 def admin_shops_list(shops: list, page: int = 0):
     rows = []
     for s in shops:
@@ -736,12 +899,26 @@ def admin_shop_card(shop_id: int, status: str):
         rows.append([btn("✅ Одобрить", f"admin_shop_ok_{shop_id}")])
         rows.append([btn("❌ Отклонить", f"admin_shop_no_{shop_id}")])
     rows.append([btn("💰 Пополнить баланс", f"admin_shop_topup_{shop_id}")])
+    rows.append([btn("✏️ Изменить данные", f"admin_shop_edit_{shop_id}")])
     rows.append([btn("📊 Статистика", f"admin_shop_stats_{shop_id}")])
     rows.append([btn("✉️ Написать", f"admin_shop_msg_{shop_id}")])
     rows.append([btn("🔙 Назад", "admin_shops")])
     return kb(rows)
 
 
+def admin_shop_edit_menu(shop_id: int):
+    return kb([
+        [btn("📛 Название", f"ase_name_{shop_id}")],
+        [btn("📍 Адрес", f"ase_address_{shop_id}")],
+        [btn("📞 Телефон", f"ase_phone_{shop_id}")],
+        [btn("📍 Гео", f"ase_geo_{shop_id}")],
+        [btn("🔙 Назад", f"admin_shop_view_{shop_id}")],
+    ])
+
+
+# ═══════════════════════════════════════════
+#   АДМИН — КУРЬЕРЫ
+# ═══════════════════════════════════════════
 def admin_couriers_list(couriers: list, page: int = 0):
     rows = []
     for c in couriers:
@@ -768,12 +945,27 @@ def admin_courier_card(courier_id: int, status: str):
     elif status == "pending":
         rows.append([btn("✅ Одобрить", f"admin_cour_ok_{courier_id}")])
         rows.append([btn("❌ Отклонить", f"admin_cour_no_{courier_id}")])
+    rows.append([btn("💰 Пополнить баланс", f"admin_cour_topup_{courier_id}")])
+    rows.append([btn("✏️ Изменить данные", f"admin_cour_edit_{courier_id}")])
     rows.append([btn("📊 Статистика", f"admin_cour_stats_{courier_id}")])
     rows.append([btn("✉️ Написать", f"admin_cour_msg_{courier_id}")])
     rows.append([btn("🔙 Назад", "admin_couriers")])
     return kb(rows)
 
 
+def admin_courier_edit_menu(courier_id: int):
+    return kb([
+        [btn("👤 Имя", f"ace_name_{courier_id}")],
+        [btn("📞 Телефон", f"ace_phone_{courier_id}")],
+        [btn("🏙 Город", f"ace_city_{courier_id}")],
+        [btn("🚗 Транспорт", f"ace_transport_{courier_id}")],
+        [btn("🔙 Назад", f"admin_cour_view_{courier_id}")],
+    ])
+
+
+# ═══════════════════════════════════════════
+#   АДМИН — ПЕРЕВОДЫ
+# ═══════════════════════════════════════════
 def admin_payments_menu():
     return kb([
         [btn("📥 Входящие заказы", "admin_pay_incoming")],
@@ -789,7 +981,6 @@ def admin_confirm_payment(order_id: int):
     return kb([
         [btn("✅ Подтвердить", f"admin_pay_ok_{order_id}")],
         [btn("❌ Отклонить", f"admin_pay_no_{order_id}")],
-        [btn("🔙 Назад", "admin_payments")],
     ])
 
 
@@ -797,7 +988,6 @@ def admin_confirm_delivery(delivery_id: int):
     return kb([
         [btn("✅ Подтвердить", f"admin_del_pay_ok_{delivery_id}")],
         [btn("❌ Отклонить", f"admin_del_pay_no_{delivery_id}")],
-        [btn("🔙 Назад", "admin_payments")],
     ])
 
 
@@ -829,12 +1019,15 @@ def admin_refunds_list(refunds: list):
 def admin_refund_card(order_id: int):
     return kb([
         [btn("💳 Вернуть на карту", f"admin_refund_card_{order_id}")],
-        [btn("💰 На баланс в боте", f"admin_refund_balance_{order_id}")],
-        [btn("❌ Отклонить возврат", f"admin_refund_reject_{order_id}")],
+        [btn("💰 На баланс", f"admin_refund_balance_{order_id}")],
+        [btn("❌ Отклонить", f"admin_refund_reject_{order_id}")],
         [btn("🔙 Назад", "admin_pay_refunds")],
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — ЗАВИСШИЕ ЗАКАЗЫ
+# ═══════════════════════════════════════════
 def admin_stuck_order(order_id: int):
     return kb([
         [btn("💰 Поднять ставку", f"admin_boost_{order_id}")],
@@ -853,6 +1046,9 @@ def admin_boost_amount(order_id: int):
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — ПРОМОКОДЫ
+# ═══════════════════════════════════════════
 def admin_promo_list(promos: list):
     rows = [[btn("➕ Создать промокод", "admin_promo_create")]]
     for p in promos[:8]:
@@ -877,23 +1073,28 @@ def admin_promo_type():
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — ЖАЛОБЫ
+# ═══════════════════════════════════════════
 def admin_complaints_list(complaints: list):
     rows = []
     for c in complaints:
-        rows.append([btn(f"🆘 #{c['order_id']} — {c['type']}", f"admin_complaint_view_{c['order_id']}")])
+        rows.append([btn(f"🆘 #{c['id']} — {c['type']}", f"admin_complaint_view_{c['id']}")])
     rows.append([btn("🔙 Назад", "admin_main")])
     return kb(rows)
 
 
-def admin_complaint_card(order_id: int):
+def admin_complaint_card(complaint_id: int):
     return kb([
-        [btn("💰 Вернуть полностью", f"admin_comp_full_{order_id}")],
-        [btn("❌ Отклонить", f"admin_comp_reject_{order_id}")],
-        [btn("📊 Детали заказа", f"admin_comp_details_{order_id}")],
+        [btn("💰 Вернуть деньги", f"admin_comp_refund_{complaint_id}")],
+        [btn("❌ Отклонить", f"admin_comp_reject_{complaint_id}")],
         [btn("🔙 Назад", "admin_complaints")],
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — РАССЫЛКА
+# ═══════════════════════════════════════════
 def admin_broadcast_menu():
     return kb([
         [btn("👥 Клиентам", "admin_bc_clients")],
@@ -910,23 +1111,73 @@ def admin_broadcast_confirm():
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — АНАЛИТИКА
+# ═══════════════════════════════════════════
 def admin_analytics_menu():
     return kb([
-        [btn("📅 За неделю", "admin_analytics_week")],
-        [btn("📅 За месяц", "admin_analytics_month")],
+        [btn("📅 Сегодня", "admin_analytics_today")],
+        [btn("📅 Неделя", "admin_analytics_week")],
+        [btn("📅 Месяц", "admin_analytics_month")],
+        [btn("📅 Всё время", "admin_analytics_all")],
         [btn("🏆 Топ-магазины", "admin_top_shops")],
         [btn("🏆 Топ-курьеры", "admin_top_couriers")],
+        [btn("📊 Дашборд смен", "admin_shifts_dashboard")],
         [btn("🔙 Назад", "admin_main")],
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — НАСТРОЙКИ
+# ═══════════════════════════════════════════
 def admin_settings_menu():
     return kb([
         [btn("🌍 Мультигород", "admin_multicity")],
+        [btn("🔄 Обновление бота", "admin_update_bot")],
         [btn("🔙 Назад", "admin_main")],
     ])
 
 
+def admin_update_bot_menu():
+    return kb([
+        [btn("📝 Новое обновление", "admin_update_new")],
+        [btn("📜 История", "admin_update_history")],
+        [btn("🔙 Назад", "admin_settings")],
+    ])
+
+
+def admin_update_confirm():
+    return kb([
+        [btn("✅ Отправить всем", "admin_update_send")],
+        [btn("❌ Отмена", "admin_main")],
+    ])
+
+
+# ═══════════════════════════════════════════
+#   АДМИН — МУЛЬТИАДМИН
+# ═══════════════════════════════════════════
+def admin_admins_menu():
+    return kb([
+        [btn("➕ Добавить админа", "admin_add_admin")],
+        [btn("📋 Список админов", "admin_list_admins")],
+        [btn("🔙 Назад", "admin_main")],
+    ])
+
+
+def admin_permissions_menu(admin_id: int, active: list):
+    rows = []
+    for key, name in config.ADMIN_PERMISSIONS.items():
+        mark = "✅" if key in active else "☐"
+        rows.append([btn(f"{mark} {name}", f"perm_toggle_{admin_id}_{key}")])
+    rows.append([btn("💾 Сохранить", f"perm_save_{admin_id}")])
+    rows.append([btn("🗑 Удалить админа", f"admin_del_{admin_id}")])
+    rows.append([btn("🔙 Назад", "admin_list_admins")])
+    return kb(rows)
+
+
+# ═══════════════════════════════════════════
+#   АДМИН — ДОСТУП ПО ID
+# ═══════════════════════════════════════════
 def admin_access_menu():
     return kb([
         [btn("🚫 Заблокировать по ID", "admin_block_by_id")],
@@ -935,6 +1186,9 @@ def admin_access_menu():
     ])
 
 
+# ═══════════════════════════════════════════
+#   АДМИН — ЛОГИ
+# ═══════════════════════════════════════════
 def admin_logs_menu():
     return kb([
         [btn("🔄 Обновить", "admin_logs")],
@@ -943,20 +1197,18 @@ def admin_logs_menu():
     ])
 
 
-def admin_deliveries_list(deliveries: list, page: int = 0):
+# ═══════════════════════════════════════════
+#   АДМИН — ДОСТАВКИ
+# ═══════════════════════════════════════════
+def admin_deliveries_list(deliveries: list):
     rows = []
     for d in deliveries:
-        status_emoji = {
-            "pending": "⏸",
-            "paid": "💳",
-            "confirmed": "✅",
-            "going": "🚴",
-            "picked": "📦",
-            "at_client": "📍",
-            "done": "✅",
-            "cancel": "❌",
+        em = {
+            "pending": "⏸", "paid": "💳", "confirmed": "✅",
+            "going": "🚴", "picked": "📦", "at_client": "📍",
+            "done": "✅", "cancel": "❌",
         }.get(d["status"], "❓")
-        rows.append([btn(f"{status_emoji} #Д-{d['id']} — {d['shop_name']}", f"admin_del_view_{d['id']}")])
+        rows.append([btn(f"{em} #Д-{d['id']} — {d['shop_name']}", f"admin_del_view_{d['id']}")])
     rows.append([btn("🔙 Назад", "admin_main")])
     return kb(rows)
 
