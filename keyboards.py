@@ -70,7 +70,10 @@ def shop_card(shop_id: int, is_subscribed: bool = False, phone: str = None):
         [btn("🔥 Хиты", f"shop_hits_{shop_id}"), btn("⭐ Отзывы", f"shop_reviews_{shop_id}")],
     ]
     if phone:
-        rows.append([btn_url("📞 Позвонить", f"tel:{phone}")])
+        p = phone.strip()
+        if not p.startswith("+"):
+            p = "+" + p
+        rows.append([btn_url("📞 Позвонить", f"tel:{p}")])
     else:
         rows.append([btn("📞 Позвонить", f"shop_call_{shop_id}")])
     rows.append([btn(sub, f"shop_subscribe_{shop_id}")])
