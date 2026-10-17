@@ -665,3 +665,510 @@ async def order_paid(call: CallbackQuery, state: FSMContext):
         )
     except Exception: pass
     await call.answer()
+    # ═══════════════════════════════════════════
+#   МОИ ЗАКАЗЫ И ТРЕКИНГ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "client_orders")
+async def my_orders(call: CallbackQuery):
+    async with async_session() as session:
+        client = await get_or_create_client(session, call.from_user.id)
+        orders = await orders_service.get_client_orders(session, client.id)
+
+        items = []
+        for o in orders[:10]:
+            can_rate = False
+            if o.status == "done":
+                r = await session.execute(select(Review).where(Review.order_id == o.id, Review.from_tg_id == call.from_user.id, Review.target_type == "shop"))
+                if not r.scalar_one_or_none():
+                    can_rate = True
+            items.append({
+                "id": o.id, "status": o.status,
+                "price": helpers.money(o.total_price), "can_rate": can_rate,
+            })
+
+    if not items:
+        await call.message.edit_text("📦 У вас пока нет заказов.", reply_markup=kb.client_back())
+        await call.answer()
+        return
+
+    await call.message.edit_text(f"📦 <b>Мои заказы ({len(orders)})</b>\n\nНажмите на заказ для деталей:", reply_markup=kb.orders_list(items))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("track_refresh_"))
+async def track_refresh(call: CallbackQuery):
+    order_id = int(call.data.split("_")[2])
+    await show_track(call.message, order_id, edit=True)
+    await call.answer("Обновлено")
+
+async def show_track(message: Message, order_id: int, edit: bool = False):
+    async with async_session() as session:
+        result = await session.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+        if not order: return
+
+        courier = None
+        if order.courier_id:
+            c_result = await session.execute(select(Courier).where(Courier.id == order.courier_id))
+            courier = c_result.scalar_one_or_none()
+
+    status_map = {
+        "pending": "⏳ Ожидает подтверждения оплаты", "new": "🆕 Новый заказ",
+        "wait": "🔍 Ищем курьера", "going": "🚴 Курьер едет в магазин",
+        "picked": "📦 Курьер забрал букет", "delivering": "🚴 Курьер везёт вам",
+        "at_client": "📍 Курьер у вас", "done": "✅ Доставлено", "cancel": "❌ Отменено",
+    }
+    status_text = status_map.get(order.status, order.status)
+
+    text = (
+        f"📦 <b>Заказ #{order.id}</b>\n\n"
+        f"📍 {order.address}\n💰 {helpers.money(order.total_price)}\n"
+        f"🕒 {helpers.format_date(order.delivery_date)} {order.delivery_slot or ''}\n\n"
+        f"━━━━━━━━━━━━━━━\n<b>{status_text}</b>\n"
+    )
+
+    if courier and order.status in ("going", "picked", "delivering", "at_client"):
+        text += f"\n👤 Курьер: {courier.name}\n⭐ {float(courier.rating or 0):.1f}"
+        if courier.lat and order.lat and courier.lon and order.lon:
+            dist = helpers.distance_km(float(courier.lat), float(courier.lon), float(order.lat), float(order.lon))
+            eta = helpers.calculate_eta(dist, courier.transport or "Авто")
+            text += f"\n📏 {dist:.1f} км | ⏱ ~{eta} мин"
+
+    markup = kb.track_order(
+        order_id, order.status, courier.phone if courier else None,
+        float(courier.lat) if courier and courier.lat else None,
+        float(courier.lon) if courier and courier.lon else None,
+    )
+
+    if edit:
+        try: await message.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest: pass
+    else:
+        await message.answer(text, reply_markup=markup)
+
+@router.callback_query(F.data.startswith("track_cancel_") & ~F.data.startswith("track_cancel_yes_"))
+async def track_cancel(call: CallbackQuery):
+    order_id = int(call.data.split("_")[2])
+    async with async_session() as session:
+        result = await session.execute(select(Order).where(Order.id == order_id))
+        order = result.scalar_one_or_none()
+
+    if not order:
+        await call.answer("Заказ не найден", show_alert=True)
+        return
+    if order.status != "pending":
+        await call.answer("❌ Заказ уже в работе. Отмена невозможна.", show_alert=True)
+        return
+
+    await call.message.edit_text(f"❌ <b>Отменить заказ #{order_id}?</b>", reply_markup=kb.cancel_confirm(order_id))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("track_cancel_yes_"))
+async def track_cancel_yes(call: CallbackQuery):
+    order_id = int(call.data.split("_")[3])
+    async with async_session() as session:
+        order = await orders_service.cancel_order(session, order_id, reason="client_cancelled", cancelled_by="client", refund=True)
+    if not order:
+        await call.answer("❌ Отмена невозможна", show_alert=True)
+        return
+    await call.message.edit_text(f"✅ Заказ #{order_id} отменён.\n💰 Деньги вернулись на баланс.", reply_markup=kb.client_main())
+    await call.answer()
+
+# ═══════════════════════════════════════════
+#   РЕДАКТИРОВАНИЕ ЗАКАЗА КЛИЕНТОМ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data.startswith("track_edit_"))
+async def track_edit(call: CallbackQuery):
+    order_id = int(call.data.split("_")[2])
+    await call.message.edit_text("✏️ <b>Что изменить?</b>", reply_markup=kb.order_edit_menu(order_id))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("oe_"))
+async def order_edit_field_start(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    field, order_id = parts[1], int(parts[2])
+
+    field_names = {"addr": "адрес", "name": "имя получателя", "phone": "телефон", "time": "время", "comment": "комментарий"}
+    await state.update_data(edit_order_id=order_id, edit_field=field)
+    await state.set_state(ClientFSM.edit_order_field)
+    await call.message.edit_text(f"✏️ Введите новое значение для «{field_names.get(field, field)}»:", reply_markup=kb.cancel_kb(f"track_refresh_{order_id}"))
+    await call.answer()
+
+@router.message(ClientFSM.edit_order_field)
+async def order_edit_field_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    order_id, field_key = data.get("edit_order_id"), data.get("edit_field")
+
+    field_map = {"addr": "address", "name": "client_name", "phone": "client_phone", "time": "delivery_slot", "comment": "comment"}
+    db_field = field_map.get(field_key)
+    new_value = message.text.strip()
+
+    async with async_session() as session:
+        ok = await orders_service.edit_order_field(session, order_id, db_field, new_value, changed_by="client", changed_by_id=message.from_user.id)
+        if not ok:
+            await message.answer("❌ Изменение невозможно (заказ уже в работе).")
+            await state.clear()
+            return
+
+        # Уведомляем курьера, если он назначен
+        o_r = await session.execute(select(Order).where(Order.id == order_id))
+        order = o_r.scalar_one_or_none()
+        if order and order.courier_id:
+            cr = await session.execute(select(Courier).where(Courier.id == order.courier_id))
+            courier = cr.scalar_one_or_none()
+            if courier and courier.tg_id:
+                try: await bot_courier.send_message(courier.tg_id, f"⚠️ <b>Клиент изменил заказ #{order_id}</b>\n\nПроверьте детали!")
+                except Exception: pass
+
+    await state.clear()
+    await message.answer("✅ Изменено!", reply_markup=kb.client_main())
+
+# ═══════════════════════════════════════════
+#   ОТЗЫВЫ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data.startswith("rate_start_"))
+async def rate_start(call: CallbackQuery):
+    order_id = int(call.data.split("_")[2])
+    await call.message.edit_text("⭐ <b>Оцените магазин:</b>", reply_markup=kb.rating_kb("shop", order_id))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("rate_") & ~F.data.startswith("rate_skip_") & ~F.data.startswith("rate_start_"))
+async def process_rating(call: CallbackQuery):
+    parts = call.data.split("_")
+    target, order_id, rating = parts[1], int(parts[2]), int(parts[3])
+
+    async with async_session() as session:
+        target_id = None
+        if target == "shop":
+            o_r = await session.execute(select(Order).where(Order.id == order_id))
+            order = o_r.scalar_one_or_none()
+            target_id = order.shop_id if order else None
+        elif target == "courier":
+            o_r = await session.execute(select(Order).where(Order.id == order_id))
+            order = o_r.scalar_one_or_none()
+            target_id = order.courier_id if order else None
+
+        # Проверка антидубля
+        check = await session.execute(select(Review).where(Review.order_id == order_id, Review.from_tg_id == call.from_user.id, Review.target_type == target))
+        if check.scalar_one_or_none():
+            await call.answer("Вы уже оценили")
+            return
+
+        session.add(Review(order_id=order_id, from_tg_id=call.from_user.id, target_type=target, target_id=target_id or 0, rating=rating))
+        await session.commit()
+
+        from sqlalchemy import func as sqlfunc
+        if target == "shop" and target_id:
+            r = await session.execute(select(sqlfunc.avg(Review.rating), sqlfunc.count(Review.id)).where(Review.target_type == "shop", Review.target_id == target_id))
+            row = r.first()
+            if row and row[0]:
+                sr = await session.execute(select(Shop).where(Shop.id == target_id))
+                shop = sr.scalar_one_or_none()
+                if shop:
+                    shop.rating = round(float(row[0]), 2)
+                    shop.reviews_count = row[1]
+                    await session.commit()
+
+        if target == "courier" and target_id:
+            r = await session.execute(select(sqlfunc.avg(Review.rating), sqlfunc.count(Review.id)).where(Review.target_type == "courier", Review.target_id == target_id))
+            row = r.first()
+            if row and row[0]:
+                cr = await session.execute(select(Courier).where(Courier.id == target_id))
+                courier = cr.scalar_one_or_none()
+                if courier:
+                    courier.rating = round(float(row[0]), 2)
+                    courier.reviews_count = row[1]
+                    await session.commit()
+
+    if target == "shop":
+        async with async_session() as session:
+            o_r = await session.execute(select(Order).where(Order.id == order_id))
+            order = o_r.scalar_one_or_none()
+        if order and order.courier_id:
+            await call.message.edit_text(f"⭐ Магазин: {rating} звёзд\n\nТеперь оцените курьера:", reply_markup=kb.rating_kb("courier", order_id))
+        else:
+            await call.message.edit_text("✅ Спасибо за оценку!", reply_markup=kb.client_main())
+    elif target == "courier":
+        await call.message.edit_text(f"⭐ Курьер: {rating} звёзд\n\n✅ Спасибо!", reply_markup=kb.client_main())
+
+    await call.answer()
+
+@router.callback_query(F.data.startswith("rate_skip_"))
+async def rate_skip(call: CallbackQuery):
+    parts = call.data.split("_")
+    target, order_id = parts[2], int(parts[3])
+
+    if target == "shop":
+        await call.message.edit_text("⭐ Оцените курьера:", reply_markup=kb.rating_kb("courier", order_id))
+    else:
+        await call.message.edit_text("✅ Спасибо за заказ! 🌸", reply_markup=kb.client_main())
+    await call.answer()
+
+# ═══════════════════════════════════════════
+#   ИЗБРАННОЕ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "client_favorites")
+async def favorites(call: CallbackQuery):
+    async with async_session() as session:
+        client = await get_or_create_client(session, call.from_user.id)
+        result = await session.execute(select(Product).join(Favorite, Favorite.product_id == Product.id).where(Favorite.client_id == client.id))
+        products = result.scalars().all()
+
+    if not products:
+        await call.message.edit_text("❤️ В избранном пусто.", reply_markup=kb.client_back())
+        await call.answer()
+        return
+
+    items = [{"id": p.id, "title": p.title} for p in products]
+    await call.message.edit_text(f"❤️ <b>Избранное ({len(items)})</b>", reply_markup=kb.favorites_list(items))
+    await call.answer()
+
+# ═══════════════════════════════════════════
+#   БАЛАНС
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "client_balance")
+async def balance(call: CallbackQuery):
+    async with async_session() as session:
+        client = await get_or_create_client(session, call.from_user.id)
+        txs = await payments_service.get_user_transactions(session, "client", client.id, 5)
+        balance_val = client.balance
+
+    text = f"💰 <b>Мой баланс: {helpers.money(balance_val)}</b>\n\n"
+    if txs:
+        text += "Последние операции:\n"
+        for t in txs:
+            sign = "+" if float(t.amount) >= 0 else ""
+            text += f"{sign}{helpers.money(t.amount)} — {t.type}\n"
+
+    await call.message.edit_text(text, reply_markup=kb.client_balance())
+    await call.answer()
+
+@router.callback_query(F.data == "balance_history")
+async def balance_history(call: CallbackQuery):
+    async with async_session() as session:
+        client = await get_or_create_client(session, call.from_user.id)
+        txs = await payments_service.get_user_transactions(session, "client", client.id, 30)
+
+    if not txs:
+        await call.message.edit_text("📜 История пуста.", reply_markup=kb.client_back("client_balance"))
+        await call.answer()
+        return
+
+    text = "📜 <b>История операций:</b>\n\n"
+    for t in txs:
+        sign = "+" if float(t.amount) >= 0 else ""
+        text += f"{helpers.format_dt(t.created_at)} — {sign}{helpers.money(t.amount)} — {t.type}\n"
+
+    await call.message.edit_text(text, reply_markup=kb.client_back("client_balance"))
+    await call.answer()
+
+@router.callback_query(F.data == "balance_withdraw")
+async def balance_withdraw(call: CallbackQuery):
+    async with async_session() as session:
+        client = await get_or_create_client(session, call.from_user.id)
+        if float(client.balance) < config.CLIENT_MIN_WITHDRAW:
+            await call.answer(f"Минимум {config.CLIENT_MIN_WITHDRAW} ₽", show_alert=True)
+            return
+
+    await call.message.edit_text(
+        f"💸 <b>Вывод на карту</b>\n\n💰 Баланс: {helpers.money(client.balance)}\n"
+        f"💳 Комиссия: {config.CLIENT_WITHDRAW_COMMISSION}%\n💵 Минимум: {config.CLIENT_MIN_WITHDRAW} ₽\n\n"
+        f"Выберите способ:",
+        reply_markup=kb.withdraw_method()
+    )
+    await call.answer()
+
+@router.callback_query(F.data == "wd_card")
+async def wd_card(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ClientFSM.withdraw_amount)
+    await call.message.edit_text("💳 <b>Вывод на карту</b>\n\nВведите сумму:", reply_markup=kb.cancel_kb("client_balance"))
+    await call.answer()
+
+@router.callback_query(F.data == "wd_sbp")
+async def wd_sbp(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ClientFSM.withdraw_amount)
+    await call.message.edit_text("📱 <b>Вывод по СБП</b>\n\nВведите сумму:", reply_markup=kb.cancel_kb("client_balance"))
+    await call.answer()
+
+@router.message(ClientFSM.withdraw_amount)
+async def process_withdraw(message: Message, state: FSMContext):
+    try: amount = Decimal(message.text.replace(",", ".").strip())
+    except Exception:
+        await message.answer("❌ Введите число.")
+        return
+
+    async with async_session() as session:
+        client = await get_or_create_client(session, message.from_user.id)
+        if amount < config.CLIENT_MIN_WITHDRAW:
+            await message.answer(f"❌ Минимум {config.CLIENT_MIN_WITHDRAW} ₽")
+            return
+        if amount > client.balance:
+            await message.answer(f"❌ Больше баланса.")
+            return
+
+    await state.update_data(withdraw_amount=float(amount))
+    await state.set_state(ClientFSM.withdraw_card)
+    await message.answer("💳 Введите номер карты (16 цифр):", reply_markup=kb.cancel_kb("client_balance"))
+
+@router.message(ClientFSM.withdraw_card)
+async def process_withdraw_card(message: Message, state: FSMContext):
+    if not helpers.is_valid_card(message.text):
+        await message.answer("❌ Неверный номер карты.")
+        return
+
+    data = await state.get_data()
+    amount = Decimal(str(data["withdraw_amount"]))
+    card = helpers.clean_phone(message.text)
+
+    async with async_session() as session:
+        client = await get_or_create_client(session, message.from_user.id)
+        payout = await payments_service.create_payout(
+            session=session, user_type="client", user_id=client.id,
+            amount=amount, method="card", card_number=card,
+        )
+        
+        if not payout:
+            await message.answer("❌ Ошибка. Недостаточно средств.")
+            await state.clear()
+            return
+
+    await state.clear()
+    commission = amount * Decimal(str(config.CLIENT_WITHDRAW_COMMISSION)) / 100
+    await message.answer(
+        f"✅ Заявка на вывод создана.\n\n💰 Сумма: {helpers.money(amount)}\n"
+        f"📉 Комиссия: -{helpers.money(commission)}\n💵 К получению: {helpers.money(amount - commission)}",
+        reply_markup=kb.client_main()
+    )
+
+# ═══════════════════════════════════════════
+#   ПРОМОКОД
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "client_promo")
+async def promo_menu(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ClientFSM.promo_input)
+    await call.message.edit_text("🎁 <b>Активация промокода</b>\n\nВведите код:", reply_markup=kb.client_back())
+    await call.answer()
+
+@router.message(ClientFSM.promo_input)
+async def promo_apply(message: Message, state: FSMContext):
+    code = message.text.strip().upper()
+    async with async_session() as session:
+        client = await get_or_create_client(session, message.from_user.id)
+        promo = await orders_service.check_promo(session, code)
+
+    if not promo:
+        await message.answer("❌ Промокод не найден.", reply_markup=kb.client_main())
+        await state.clear()
+        return
+
+    if promo.valid_until and promo.valid_until < date.today():
+        await message.answer("❌ Промокод истёк.", reply_markup=kb.client_main())
+        await state.clear()
+        return
+
+    if promo.max_uses > 0 and promo.used_count >= promo.max_uses:
+        await message.answer("❌ Промокод больше не действует.", reply_markup=kb.client_main())
+        await state.clear()
+        return
+
+    async with async_session() as session:
+        client = await get_or_create_client(session, message.from_user.id)
+        client.active_promo = code
+        await session.commit()
+
+    d = f"{int(promo.discount_value)}%" if promo.discount_type == "percent" else helpers.money(promo.discount_value)
+    await state.clear()
+    await message.answer(f"✅ <b>Промокод активирован!</b>\n\n🎁 {code} — {d}", reply_markup=kb.client_main())
+
+# ═══════════════════════════════════════════
+#   СОБЫТИЯ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "client_events")
+async def events(call: CallbackQuery):
+    async with async_session() as session:
+        client = await get_or_create_client(session, call.from_user.id)
+        result = await session.execute(select(ClientEvent).where(ClientEvent.client_id == client.id).order_by(ClientEvent.event_date.asc()))
+        events_list = result.scalars().all()
+
+    if not events_list:
+        text = "📅 <b>Мои события</b>\n\nВы пока не добавили ни одного события."
+    else:
+        text = f"📅 <b>Мои события ({len(events_list)})</b>\n\n"
+        for e in events_list:
+            text += f"• {helpers.format_date(e.event_date)} — {e.title}\n"
+
+    await call.message.edit_text(text, reply_markup=kb.events_menu())
+    await call.answer()
+
+@router.callback_query(F.data == "event_add")
+async def event_add(call: CallbackQuery, state: FSMContext):
+    await state.set_state(ClientFSM.event_whom)
+    await call.message.edit_text("📅 <b>Кому напомнить?</b>", reply_markup=kb.event_whom())
+    await call.answer()
+
+@router.callback_query(F.data.startswith("event_whom_") & ~F.data.startswith("event_whom_custom"), ClientFSM.event_whom)
+async def event_set_whom(call: CallbackQuery, state: FSMContext):
+    whom = call.data.replace("event_whom_", "")
+    await state.update_data(event_whom=whom)
+    await state.set_state(ClientFSM.event_date)
+    await call.message.edit_text("📅 <b>Когда?</b>\n\nВведите дату ДД.ММ.ГГГГ\nПример: 15.05.1990", reply_markup=kb.cancel_kb("client_main"))
+    await call.answer()
+
+@router.callback_query(F.data == "event_whom_custom", ClientFSM.event_whom)
+async def event_custom_whom(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text("✏️ Введите имя:", reply_markup=kb.cancel_kb("client_main"))
+    await call.answer()
+
+@router.message(ClientFSM.event_whom)
+async def event_set_custom_whom(message: Message, state: FSMContext):
+    await state.update_data(event_whom=message.text.strip())
+    await state.set_state(ClientFSM.event_date)
+    await message.answer("📅 <b>Когда?</b>\n\nВведите дату ДД.ММ.ГГГГ", reply_markup=kb.cancel_kb("client_main"))
+
+@router.message(ClientFSM.event_date)
+async def event_set_date(message: Message, state: FSMContext):
+    try: d = datetime.strptime(message.text.strip(), "%d.%m.%Y").date()
+    except Exception:
+        await message.answer("❌ Неверный формат.")
+        return
+    await state.update_data(event_date=str(d))
+    await state.set_state(ClientFSM.event_type)
+    await message.answer("🎉 <b>Что за событие?</b>", reply_markup=kb.event_type())
+
+@router.callback_query(F.data.startswith("event_type_") & ~F.data.startswith("event_type_custom"), ClientFSM.event_type)
+async def event_set_type(call: CallbackQuery, state: FSMContext):
+    etype = call.data.replace("event_type_", "")
+    data = await state.get_data()
+    title = f"{etype} {data.get('event_whom', '')}".strip()
+
+    async with async_session() as session:
+        client = await get_or_create_client(session, call.from_user.id)
+        session.add(ClientEvent(
+            client_id=client.id, title=title, event_type=etype,
+            event_date=datetime.strptime(data["event_date"], "%Y-%m-%d").date(),
+        ))
+        await session.commit()
+
+    await state.clear()
+    await call.message.edit_text(f"✅ Событие добавлено!\n\n📅 {data['event_date']} — {title}", reply_markup=kb.client_main())
+    await call.answer()
+
+@router.callback_query(F.data == "event_type_custom", ClientFSM.event_type)
+async def event_custom_type(call: CallbackQuery, state: FSMContext):
+    await call.message.edit_text("✏️ Введите название события:", reply_markup=kb.cancel_kb("client_main"))
+    await call.answer()
+
+@router.message(ClientFSM.event_type)
+async def event_set_custom_type(message: Message, state: FSMContext):
+    data = await state.get_data()
+    title = message.text.strip()
+
+    async with async_session() as session:
+        client = await get_or_create_client(session, message.from_user.id)
+        session.add(ClientEvent(
+            client_id=client.id, title=title, event_type="other",
+            event_date=datetime.strptime(data["event_date"], "%Y-%m-%d").date(),
+        ))
+        await session.commit()
+
+    await state.clear()
+    await message.answer(f"✅ Событие «{title}» добавлено!", reply_markup=kb.client_main())
