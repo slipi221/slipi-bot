@@ -25,7 +25,7 @@ from services import orders as orders_service
 from services import geo as geo_service
 from services import payments as payments_service
 from utils import helpers
-from bots import bot_admin, bot_shop
+from bots import bot_admin, bot_shop, bot_courier
 
 router = Router(name="client")
 
@@ -237,12 +237,13 @@ async def prods_page(call: CallbackQuery):
         await call.message.delete()
         await call.message.answer(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page))
     await call.answer()
-
-# ЖЕЛЕЗОБЕТОННАЯ КАРТОЧКА ТОВАРА С ФОТО
+    # ЖЕЛЕЗОБЕТОННАЯ КАРТОЧКА ТОВАРА С ФОТО
 @router.callback_query(F.data.startswith("product_"))
 async def product_card(call: CallbackQuery):
-    try: product_id = int(call.data.split("_")[1])
-    except (IndexError, ValueError): return
+    try: 
+        product_id = int(call.data.split("_")[1])
+    except (IndexError, ValueError): 
+        return
 
     async with async_session() as session:
         result = await session.execute(select(Product).where(Product.id == product_id))
@@ -297,8 +298,9 @@ async def fav_toggle(call: CallbackQuery):
             session.add(Favorite(client_id=client.id, product_id=product_id))
             await session.commit()
             await call.answer("❤️ Добавлено")
-            # ═══════════════════════════════════════════
-#   КОРЗИНА
+
+# ═══════════════════════════════════════════
+#   КОРЗИНА (С ЗАЩИТОЙ ОТ ОШИБКИ РЕДАКТИРОВАНИЯ)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_cart")
 async def open_cart(call: CallbackQuery):
@@ -337,7 +339,12 @@ async def cart_view(call: CallbackQuery):
         rows = result.all()
 
     if not rows:
-        await call.message.edit_text("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
+        try:
+            await call.message.edit_text("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
+        except TelegramBadRequest:
+            await call.message.delete()
+            await call.message.answer("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
+        await call.answer()
         return
 
     text = "🛒 <b>Ваша корзина</b>\n\n"
@@ -349,7 +356,14 @@ async def cart_view(call: CallbackQuery):
 
     text += f"\n🚚 Доставка рассчитывается по адресу"
     text += f"\n<b>Итого (без доставки): {helpers.money(total)}</b>"
-    await call.message.edit_text(text, reply_markup=kb.cart_view())
+    
+    # Защита от ошибки "there is no text in the message to edit"
+    try:
+        await call.message.edit_text(text, reply_markup=kb.cart_view())
+    except TelegramBadRequest:
+        await call.message.delete()
+        await call.message.answer(text, reply_markup=kb.cart_view())
+        
     await call.answer()
 
 @router.callback_query(F.data == "cart_edit")
@@ -360,7 +374,11 @@ async def cart_edit(call: CallbackQuery):
         rows = result.all()
 
     items = [(ci.id, p.title, ci.quantity) for ci, p in rows]
-    await call.message.edit_text("✏️ <b>Изменить количество:</b>", reply_markup=kb.cart_edit(items))
+    try:
+        await call.message.edit_text("✏️ <b>Изменить количество:</b>", reply_markup=kb.cart_edit(items))
+    except TelegramBadRequest:
+        await call.message.delete()
+        await call.message.answer("✏️ <b>Изменить количество:</b>", reply_markup=kb.cart_edit(items))
     await call.answer()
 
 @router.callback_query(F.data.startswith("cart_plus_"))
@@ -394,7 +412,11 @@ async def cart_remove_menu(call: CallbackQuery):
         rows = result.all()
 
     items = [(ci.id, p.title) for ci, p in rows]
-    await call.message.edit_text("🗑 <b>Что удалить?</b>", reply_markup=kb.cart_remove_menu(items))
+    try:
+        await call.message.edit_text("🗑 <b>Что удалить?</b>", reply_markup=kb.cart_remove_menu(items))
+    except TelegramBadRequest:
+        await call.message.delete()
+        await call.message.answer("🗑 <b>Что удалить?</b>", reply_markup=kb.cart_remove_menu(items))
     await call.answer()
 
 @router.callback_query(F.data.startswith("cart_del_"))
@@ -411,9 +433,12 @@ async def cart_clear(call: CallbackQuery):
         client = await get_or_create_client(session, call.from_user.id)
         await session.execute(delete(CartItem).where(CartItem.client_id == client.id))
         await session.commit()
-    await call.message.edit_text("🗑 Корзина очищена.", reply_markup=kb.cart_empty())
-
-# ═══════════════════════════════════════════
+    try:
+        await call.message.edit_text("🗑 Корзина очищена.", reply_markup=kb.cart_empty())
+    except TelegramBadRequest:
+        await call.message.delete()
+        await call.message.answer("🗑 Корзина очищена.", reply_markup=kb.cart_empty())
+        # ═══════════════════════════════════════════
 #   ОФОРМЛЕНИЕ ЗАКАЗА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "cart_checkout")
