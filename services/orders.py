@@ -167,7 +167,7 @@ async def create_order_from_cart(
     return order
 
 # ═══════════════════════════════════════════
-#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (С ФОТО И НАКЛАДНОЙ)
+#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (С ЭКРАНИРОВАНИЕМ)
 # ═══════════════════════════════════════════
 async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
@@ -192,7 +192,6 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
 
     await session.commit()
 
-    # ── УВЕДОМЛЕНИЕ МАГАЗИНУ ──
     if shop:
         from keyboards import shop_order_new
         from services.notify import send_notification
@@ -207,7 +206,7 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
         items_text = ""
         media = []
         for it in items:
-            items_text += f"  • {it.title} × {it.quantity} = {helpers.money(it.total)}\n"
+            items_text += f"  • {helpers.escape(it.title)} × {it.quantity} = {helpers.money(it.total)}\n"
             if it.photo_id:
                 media.append(InputMediaPhoto(media=it.photo_id))
         
@@ -221,15 +220,15 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
             f"{items_text}"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📍 <b>КУДА ДОСТАВИТЬ:</b>\n"
-            f"  {order.address}\n"
-            f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
-            f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
+            f"  {helpers.escape(order.address)}\n"
+            f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {helpers.escape(order.client_name)}\n"
+            f"📞 <b>ТЕЛЕФОН:</b> {helpers.escape(order.client_phone)}\n"
             f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
             f"🕒 <b>ВРЕМЯ ДОСТАВКИ:</b> {order.delivery_slot or '—'}\n"
         )
         
         if order.comment:
-            text += f"💬 <b>КОММЕНТАРИЙ:</b> {order.comment}\n"
+            text += f"💬 <b>КОММЕНТАРИЙ:</b> {helpers.escape(order.comment)}\n"
         
         text += f"📸 <b>ФОТО ВРУЧЕНИЯ:</b> {'Да' if order.need_delivery_photo else 'Нет'}\n"
         text += (
@@ -264,7 +263,8 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
 async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> bool:
     c_result = await session.execute(select(Courier).where(Courier.id == courier_id))
     courier = c_result.scalar_one_or_none()
-    if not courier or courier.courier_state != "on": return False
+    # Разрешаем брать заказы, если курьер на смене ИЛИ уже в работе
+    if not courier or courier.courier_state not in ("on", "busy"): return False
 
     result = await session.execute(
         update(Order).where(Order.id == order_id, Order.status == "wait", Order.courier_id.is_(None))
@@ -289,7 +289,7 @@ async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> b
             
             items_text = ""
             for it in items:
-                items_text += f"  • {it.title} × {it.quantity} = {helpers.money(it.total)}\n"
+                items_text += f"  • {helpers.escape(it.title)} × {it.quantity} = {helpers.money(it.total)}\n"
             
             text = (
                 f"🔔 <b>ЗАКАЗ #{order.id}</b>\n"
@@ -300,22 +300,22 @@ async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> b
                 f"{items_text}"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📍 <b>КУДА ДОСТАВИТЬ:</b>\n"
-                f"  {order.address}\n"
-                f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
-                f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
+                f"  {helpers.escape(order.address)}\n"
+                f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {helpers.escape(order.client_name)}\n"
+                f"📞 <b>ТЕЛЕФОН:</b> {helpers.escape(order.client_phone)}\n"
                 f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
                 f"🕒 <b>ВРЕМЯ ДОСТАВКИ:</b> {order.delivery_slot or '—'}\n"
             )
             
             if order.comment:
-                text += f"💬 <b>КОММЕНТАРИЙ:</b> {order.comment}\n"
+                text += f"💬 <b>КОММЕНТАРИЙ:</b> {helpers.escape(order.comment)}\n"
             
             text += (
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🚴 <b>ВАШ КУРЬЕР:</b>\n"
-                f"  👤 {courier.name}\n"
-                f"  📞 {courier.phone}\n"
-                f"  🚗 {courier.transport}\n"
+                f"  👤 {helpers.escape(courier.name)}\n"
+                f"  📞 {helpers.escape(courier.phone)}\n"
+                f"  🚗 {helpers.escape(courier.transport)}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"💰 <b>ФИНАНСЫ:</b>\n"
                 f"  Стоимость букетов: {helpers.money(order.items_total)}\n"
@@ -348,7 +348,6 @@ async def update_order_status(session: AsyncSession, order_id: int, new_status: 
         update(Order).where(Order.id == order_id).values(status=new_status)
     )
     await session.commit()
-    # После смены статуса обновляем сообщение клиента
     await update_client_order_message(session, order_id)
 
 # ═══════════════════════════════════════════
@@ -393,10 +392,7 @@ async def complete_order(session: AsyncSession, order_id: int):
     session.add(Transaction(user_type="platform", user_id=0, amount=order.platform_income, type="order_income", order_id=order_id))
 
     await session.commit()
-    
-    # Обновляем сообщение клиента
     await update_client_order_message(session, order_id)
-    
     return order
 
 # ═══════════════════════════════════════════
@@ -438,10 +434,7 @@ async def cancel_order(
         )
 
     await session.commit()
-    
-    # Обновляем сообщение клиента
     await update_client_order_message(session, order_id)
-    
     return order
 
 # ═══════════════════════════════════════════
@@ -479,14 +472,14 @@ async def update_client_order_message(session: AsyncSession, order_id: int):
         f"🌷 <b>СОСТАВ ЗАКАЗА:</b>\n"
     )
     for it in items:
-        text += f"  • {it.title} × {it.quantity} = {helpers.money(it.total)}\n"
+        text += f"  • {helpers.escape(it.title)} × {it.quantity} = {helpers.money(it.total)}\n"
     
     text += (
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📍 <b>КУДА ДОСТАВИТЬ:</b>\n"
-        f"  {order.address}\n"
-        f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
-        f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
+        f"  {helpers.escape(order.address)}\n"
+        f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {helpers.escape(order.client_name)}\n"
+        f"📞 <b>ТЕЛЕФОН:</b> {helpers.escape(order.client_phone)}\n"
         f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
         f"🕒 <b>ВРЕМЯ ДОСТАВКИ:</b> {order.delivery_slot or '—'}\n"
     )
@@ -495,8 +488,8 @@ async def update_client_order_message(session: AsyncSession, order_id: int):
         text += (
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🚴 <b>ВАШ КУРЬЕР:</b>\n"
-            f"  👤 {courier.name}\n"
-            f"  📞 {courier.phone}\n"
+            f"  👤 {helpers.escape(courier.name)}\n"
+            f"  📞 {helpers.escape(courier.phone)}\n"
         )
     
     text += (
