@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — логика заказов
+Flowers Express — логика заказов
 """
 from datetime import datetime, date
 from decimal import Decimal
-
-from sqlalchemy import select, update
+from sqlalchemy import select, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import config
@@ -21,7 +20,7 @@ from services import notify
 #   РАСЧЁТЫ
 # ═══════════════════════════════════════════
 def calculate_cart_total(items: list, distance_km: float = 0) -> dict:
-    items_total = Decimal("0")
+    items_total = Decimal("0.00")
     bouquets_count = 0
 
     for item in items:
@@ -32,30 +31,35 @@ def calculate_cart_total(items: list, distance_km: float = 0) -> dict:
         if product.category == "bouquets":
             bouquets_count += qty
 
-    discount = Decimal("0")
+    discount = Decimal("0.00")
     if bouquets_count >= config.BULK_DISCOUNT_MIN_BOUQUETS:
         discount = (items_total * Decimal(str(config.BULK_DISCOUNT_PERCENT)) / Decimal("100")).quantize(Decimal("0.01"))
 
     zone = config.get_delivery_zone(distance_km)
-    delivery = Decimal("0") if zone is None else Decimal(str(zone["client_pays"]))
+    delivery = Decimal("0.00") if zone is None else Decimal(str(zone["client_pays"]))
 
     total = items_total - discount + delivery
 
     return {
-        "items_total": items_total, "discount": discount, "delivery": delivery,
-        "total": total.quantize(Decimal("0.01")), "bouquets_count": bouquets_count, "zone": zone,
+        "items_total": items_total, 
+        "discount": discount, 
+        "delivery": delivery,
+        "total": total.quantize(Decimal("0.01")), 
+        "bouquets_count": bouquets_count, 
+        "zone": zone,
     }
 
 def calculate_platform_income(items: list, distance_km: float, discount: Decimal) -> Decimal:
-    markup_total = Decimal("0")
+    """Считает чистый доход платформы (не уходит в минус)."""
+    markup_total = Decimal("0.00")
     for item in items:
         markup_total += Decimal(str(item["product"].markup)) * item["quantity"]
 
     zone = config.get_delivery_zone(distance_km)
-    delivery_income = Decimal(str(zone["platform_gets"])) if zone else Decimal("0")
+    delivery_income = Decimal(str(zone["platform_gets"])) if zone else Decimal("0.00")
 
     income = markup_total + delivery_income - discount
-    return max(income, Decimal("0")).quantize(Decimal("0.01"))
+    return max(income, Decimal("0.00")).quantize(Decimal("0.01"))
 
 # ═══════════════════════════════════════════
 #   ПРОМОКОД
@@ -64,17 +68,22 @@ async def check_promo(session: AsyncSession, code: str) -> Promo | None:
     result = await session.execute(select(Promo).where(Promo.code == code, Promo.is_active == True))
     return result.scalar_one_or_none()
 
-async def calc_promo_discount(session: AsyncSession, promo: Promo, total: Decimal, client_id: int) -> Decimal:
-    if promo.valid_until and promo.valid_until < date.today(): return Decimal("0")
-    if promo.max_uses > 0 and promo.used_count >= promo.max_uses: return Decimal("0")
-    if total < promo.min_order: return Decimal("0")
+async def calc_promo_discount(session: AsyncSession, promo: Promo, items_total: Decimal, client_id: int) -> Decimal:
+    # ИСПРАВЛЕНО: московское время
+    if promo.valid_until and promo.valid_until < helpers.today_moscow(): 
+        return Decimal("0.00")
+    if promo.max_uses > 0 and promo.used_count >= promo.max_uses: 
+        return Decimal("0.00")
+    if items_total < promo.min_order: 
+        return Decimal("0.00")
 
     used = await session.execute(select(PromoUse).where(PromoUse.promo_id == promo.id, PromoUse.client_id == client_id))
-    if used.scalar_one_or_none(): return Decimal("0")
+    if used.scalar_one_or_none(): 
+        return Decimal("0.00")
 
     if promo.discount_type == "percent":
-        return (total * promo.discount_value / Decimal("100")).quantize(Decimal("0.01"))
-    return promo.discount_value
+        return (items_total * promo.discount_value / Decimal("100")).quantize(Decimal("0.01"))
+    return promo.discount_value.quantize(Decimal("0.01"))
 
 # ═══════════════════════════════════════════
 #   СОЗДАНИЕ ЗАКАЗА
@@ -92,6 +101,27 @@ async def create_order_from_cart(
     need_photo: bool = True,
     distance_km: float = 0,
 ) -> Order | None:
+    # ВАЛИДАЦИЯ: Пустой адрес
+    if not address or not address.strip():
+        return None
+        
+    # ИСПРАВЛЕНО: Берем московское "сегодня" один раз
+    today = helpers.today_moscow()
+    
+    # ВАЛИДАЦИЯ: Дата доставки
+    if delivery_date < today:
+        return None
+    if (delivery_date - today).days > config.PREORDER_DAYS_AHEAD:
+        return None
+        
+    # ВАЛИДАЦИЯ: Слот доставки
+    valid_slots = []
+    for period in config.DELIVERY_SLOTS.values():
+        valid_slots.extend(period["slots"])
+    if delivery_slot not in valid_slots:
+        return None
+
+    # Антидубль: если уже есть pending заказ — возвращаем его
     existing = await session.execute(
         select(Order).where(Order.client_id == client_id, Order.status == "pending").order_by(Order.id.desc()).limit(1)
     )
@@ -106,6 +136,12 @@ async def create_order_from_cart(
     if len(shop_ids) > 1: return None
     shop_id = shop_ids.pop()
 
+    # Проверка, что магазин активен
+    shop_res = await session.execute(select(Shop).where(Shop.id == shop_id))
+    shop = shop_res.scalar_one_or_none()
+    if not shop or shop.status != "active" or shop.is_paused:
+        return None
+
     items = []
     for ci in cart_items:
         p_result = await session.execute(select(Product).where(Product.id == ci.product_id))
@@ -118,22 +154,23 @@ async def create_order_from_cart(
     totals = calculate_cart_total(items, distance_km)
     if totals["zone"] is None: return None
 
-    promo_discount = Decimal("0")
+    promo_discount = Decimal("0.00")
     promo_obj = None
     if promo_code:
         promo_obj = await check_promo(session, promo_code)
         if promo_obj:
-            promo_discount = await calc_promo_discount(session, promo_obj, totals["total"], client_id)
+            promo_discount = await calc_promo_discount(session, promo_obj, totals["items_total"], client_id)
 
     final_total = totals["total"] - promo_discount
     total_discount = totals["discount"] + promo_discount
 
     platform_income = calculate_platform_income(items, distance_km, total_discount)
-    is_preorder = delivery_date > date.today()
+    # ИСПРАВЛЕНО: московское время
+    is_preorder = delivery_date > today
 
     order = Order(
         client_id=client_id, shop_id=shop_id, status="pending", payment_status="pending",
-        address=address, client_name=client_name, client_phone=client_phone, comment=comment,
+        address=address.strip(), client_name=client_name.strip(), client_phone=client_phone, comment=comment,
         delivery_date=delivery_date, delivery_slot=delivery_slot, is_preorder=is_preorder,
         items_total=totals["items_total"], delivery_price=totals["delivery"],
         discount=total_discount, total_price=final_total, platform_income=platform_income,
@@ -165,25 +202,24 @@ async def create_order_from_cart(
 
     await session.commit()
     return order
-
-# ═══════════════════════════════════════════
-#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (С ЭКРАНИРОВАНИЕМ)
+    # ═══════════════════════════════════════════
+#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (С УВЕДОМЛЕНИЕМ МАГАЗИНУ)
 # ═══════════════════════════════════════════
 async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
     order = result.scalar_one_or_none()
-    if not order: return None
+    if not order or order.payment_status == "confirmed": return None
 
     order.payment_status = "confirmed"
     order.status = "new" 
-    order.wait_started_at = datetime.now() 
+    order.wait_started_at = helpers.now_moscow()
 
     p_result = await session.execute(select(Payment).where(Payment.order_id == order_id))
     payment = p_result.scalar_one_or_none()
-    if payment:
+    if payment and payment.status == "pending":
         payment.status = "confirmed"
         payment.admin_id = admin_id
-        payment.confirmed_at = datetime.now()
+        payment.confirmed_at = helpers.now_moscow()
 
     shop_result = await session.execute(select(Shop).where(Shop.id == order.shop_id))
     shop = shop_result.scalar_one_or_none()
@@ -241,8 +277,7 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
         
         if is_shop_awake:
             if media:
-                try:
-                    await bot_shop.send_media_group(chat_id=shop.tg_id, media=media[:10])
+                try: await bot_shop.send_media_group(chat_id=shop.tg_id, media=media[:10])
                 except Exception: pass
             
             try:
@@ -257,25 +292,23 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
                 force_outbox=True
             )
     return order
-    # ═══════════════════════════════════════════
-#   ВЗЯТИЕ ЗАКАЗА (С ОБНОВЛЕНИЕМ МАГАЗИНА И КЛИЕНТА)
+
+# ═══════════════════════════════════════════
+#   ВЗЯТИЕ ЗАКАЗА КУРЬЕРОМ
 # ═══════════════════════════════════════════
 async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> bool:
     c_result = await session.execute(select(Courier).where(Courier.id == courier_id))
     courier = c_result.scalar_one_or_none()
-    # Разрешаем брать заказы, если курьер на смене ИЛИ уже в работе
     if not courier or courier.courier_state not in ("on", "busy"): return False
 
     result = await session.execute(
         update(Order).where(Order.id == order_id, Order.status == "wait", Order.courier_id.is_(None))
-        .values(courier_id=courier_id, status="going", taken_at=datetime.now())
+        .values(courier_id=courier_id, status="going", taken_at=helpers.now_moscow())
     )
     await session.commit()
 
-    if result.rowcount != 1:
-        return False
+    if result.rowcount != 1: return False
 
-    # ── ОБНОВЛЯЕМ СООБЩЕНИЕ МАГАЗИНУ ──
     o_result = await session.execute(select(Order).where(Order.id == order_id))
     order = o_result.scalar_one_or_none()
     
@@ -327,26 +360,18 @@ async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> b
             from aiogram.exceptions import TelegramBadRequest
             
             try:
-                await bot_shop.edit_message_text(
-                    chat_id=shop.tg_id,
-                    message_id=order.track_message_id,
-                    text=text
-                )
+                await bot_shop.edit_message_text(chat_id=shop.tg_id, message_id=order.track_message_id, text=text)
             except TelegramBadRequest as e:
                 print(f"Не удалось обновить сообщение магазину: {e}")
     
-    # ── ОБНОВЛЯЕМ СООБЩЕНИЕ КЛИЕНТУ ──
     await update_client_order_message(session, order_id)
-    
     return True
 
 # ═══════════════════════════════════════════
 #   СМЕНА СТАТУСА
 # ═══════════════════════════════════════════
 async def update_order_status(session: AsyncSession, order_id: int, new_status: str):
-    await session.execute(
-        update(Order).where(Order.id == order_id).values(status=new_status)
-    )
+    await session.execute(update(Order).where(Order.id == order_id).values(status=new_status))
     await session.commit()
     await update_client_order_message(session, order_id)
 
@@ -359,7 +384,7 @@ async def complete_order(session: AsyncSession, order_id: int):
     if not order or order.status == "done": return None
 
     order.status = "done"
-    order.delivered_at = datetime.now()
+    order.delivered_at = helpers.now_moscow()
 
     courier_fee = Decimal(str(order.courier_fee or 0))
     courier_fee += Decimal(str(order.boost_amount or 0))
@@ -377,14 +402,14 @@ async def complete_order(session: AsyncSession, order_id: int):
         )
         
         today_stat = await session.execute(
-            select(CourierDailyStat).where(CourierDailyStat.courier_id == order.courier_id, CourierDailyStat.date == date.today())
+            select(CourierDailyStat).where(CourierDailyStat.courier_id == order.courier_id, CourierDailyStat.date == helpers.today_moscow())
         )
         stat = today_stat.scalar_one_or_none()
         if stat:
             stat.completed_orders += 1
             stat.earned += courier_fee
         else:
-            session.add(CourierDailyStat(courier_id=order.courier_id, date=date.today(), completed_orders=1, earned=courier_fee))
+            session.add(CourierDailyStat(courier_id=order.courier_id, date=helpers.today_moscow(), completed_orders=1, earned=courier_fee))
 
     session.add(Transaction(user_type="shop", user_id=order.shop_id, amount=shop_sum, type="order_payment", order_id=order_id))
     if order.courier_id:
@@ -396,20 +421,13 @@ async def complete_order(session: AsyncSession, order_id: int):
     return order
 
 # ═══════════════════════════════════════════
-#   ОТМЕНА ЗАКАЗА
+#   ОТМЕНА ЗАКАЗА (ЗАЩИТА ОТ ДВОЙНОГО ВОЗВРАТА)
 # ═══════════════════════════════════════════
-async def cancel_order(
-    session: AsyncSession,
-    order_id: int,
-    reason: str = None,
-    cancelled_by: str = "shop",
-    refund: bool = True,
-):
+async def cancel_order(session: AsyncSession, order_id: int, reason: str = None, cancelled_by: str = "shop", refund: bool = True):
     result = await session.execute(select(Order).where(Order.id == order_id))
     order = result.scalar_one_or_none()
-    if not order: return None
-
-    if order.status in ("picked", "delivering", "at_client", "done"):
+    
+    if not order or order.status in ("picked", "delivering", "at_client", "done", "cancel"): 
         return None
 
     order.status = "cancel"
@@ -429,8 +447,7 @@ async def cancel_order(
 
     if cancelled_by == "shop":
         await session.execute(
-            update(Shop).where(Shop.id == order.shop_id)
-            .values(rejected_count=Shop.rejected_count + 1)
+            update(Shop).where(Shop.id == order.shop_id).values(rejected_count=Shop.rejected_count + 1)
         )
 
     await session.commit()
@@ -438,7 +455,7 @@ async def cancel_order(
     return order
 
 # ═══════════════════════════════════════════
-#   АВТООБНОВЛЕНИЕ СООБЩЕНИЯ КЛИЕНТА (НАКЛАДНАЯ)
+#   АВТООБНОВЛЕНИЕ СООБЩЕНИЯ КЛИЕНТА
 # ═══════════════════════════════════════════
 async def update_client_order_message(session: AsyncSession, order_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
@@ -509,10 +526,7 @@ async def update_client_order_message(session: AsyncSession, order_id: int):
 
     try:
         await bot_client.edit_message_text(
-            chat_id=client.tg_id,
-            message_id=order.client_message_id,
-            text=text,
-            reply_markup=markup
+            chat_id=client.tg_id, message_id=order.client_message_id, text=text, reply_markup=markup
         )
     except TelegramBadRequest as e:
         print(f"Не удалось обновить сообщение клиенту: {e}")
@@ -603,7 +617,6 @@ async def get_courier_active_orders(session: AsyncSession, courier_id: int):
 #   ПОВТОРИТЬ ЗАКАЗ
 # ═══════════════════════════════════════════
 async def repeat_order(session: AsyncSession, order_id: int, client_id: int) -> dict:
-    from sqlalchemy import delete
     await session.execute(delete(CartItem).where(CartItem.client_id == client_id))
 
     items_result = await session.execute(select(OrderItem).where(OrderItem.order_id == order_id))
@@ -621,3 +634,4 @@ async def repeat_order(session: AsyncSession, order_id: int, client_id: int) -> 
 
     await session.commit()
     return {"ok": added > 0, "added": added, "skipped": skipped}
+    
