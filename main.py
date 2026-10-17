@@ -1,40 +1,27 @@
 # -*- coding: utf-8 -*-
+"""
+SLIPI — точка входа
+"""
 import asyncio
 import logging
 from datetime import datetime, date, timedelta
-from decimal import Decimal
 
 from aiogram import Dispatcher
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from sqlalchemy import select, update, text
 
 import config
-from database import engine, Base, async_session
-from models import (
-    Order, ClientEvent, Courier, Client, Shop, Product,
-    DeliveryOrder, DeliveryPayment, CourierDailyStat, ShopSubscription,
-)
+from database import init_db, async_session
 from handlers import client as client_h
 from handlers import shop as shop_h
 from handlers import courier as courier_h
 from handlers import admin as admin_h
 from services import bonuses as bonuses_service
-from services import orders as orders_service
-from services import notify
-from utils import helpers
 
 from bots import bot_client, bot_shop, bot_courier, bot_admin
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger("slipi")
 
-# ═══════════════════════════════════════════
-#   ДИСПЕТЧЕРЫ И РОУТЕРЫ
-# ═══════════════════════════════════════════
 dp_client = Dispatcher()
 dp_shop = Dispatcher()
 dp_courier = Dispatcher()
@@ -45,22 +32,16 @@ dp_shop.include_router(shop_h.router)
 dp_courier.include_router(courier_h.router)
 dp_admin.include_router(admin_h.router)
 
-# ═══════════════════════════════════════════
-#   ПЛАНИРОВЩИК (все 8 задач)
-# ═══════════════════════════════════════════
-# (Здесь оставь все функции задач: daily_bonus_job, auto_cancel_job и т.д., 
-# которые я присылал в предыдущем сообщении. Они не меняются.)
-# ...
+async def daily_bonus_job():
+    async with async_session() as session:
+        await bonuses_service.apply_all_daily_bonuses(session)
 
 def setup_scheduler():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
-    # (Оставь тут добавление задач, как было)
+    scheduler.add_job(daily_bonus_job, "cron", hour=23, minute=59)
     scheduler.start()
     log.info("⏰ Планировщик запущен")
 
-# ═══════════════════════════════════════════
-#   ЗАПУСК БОТОВ
-# ═══════════════════════════════════════════
 async def run_bot(bot, dp, name: str):
     try:
         await bot.delete_webhook(drop_pending_updates=True)
@@ -72,16 +53,11 @@ async def run_bot(bot, dp, name: str):
 async def main():
     log.info("🚀 SLIPI — запуск")
 
-    # ПРИНУДИТЕЛЬНОЕ СОЗДАНИЕ ТАБЛИЦ
     try:
-        log.info(f"🔧 Подключение к БД: {config.DATABASE_URL}")
-        async with engine.begin() as conn:
-            await conn.execute(text("PRAGMA journal_mode=WAL"))
-            await conn.execute(text("PRAGMA synchronous=NORMAL"))
-            await conn.run_sync(Base.metadata.create_all)
-        log.info("✅ Все таблицы успешно созданы в базе!")
+        await init_db()
+        log.info("✅ База данных готова")
     except Exception as e:
-        log.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА БД: {e}")
+        log.error(f"❌ Ошибка БД: {e}")
         return
 
     setup_scheduler()
