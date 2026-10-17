@@ -6,7 +6,7 @@ from datetime import datetime, date, timedelta
 from decimal import Decimal
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from sqlalchemy import select, update
 
@@ -203,7 +203,7 @@ async def off_shift(call: CallbackQuery):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   СВОБОДНЫЕ ЗАКАЗЫ (С УЧЕТОМ БУСТА)
+#   СВОБОДНЫЕ ЗАКАЗЫ (С БУСТОМ)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_free_orders")
 async def free_orders(call: CallbackQuery):
@@ -226,9 +226,7 @@ async def free_orders(call: CallbackQuery):
                 if shop and shop.lat and shop.lon:
                     distance = helpers.distance_km(float(courier.lat), float(courier.lon), float(shop.lat), float(shop.lon))
             
-            # ИСПРАВЛЕНО: Учитываем буст при показе цены
             fee = float(o.courier_fee or 0) + float(o.boost_amount or 0)
-            
             wait_min = 0
             if o.wait_started_at: wait_min = int((datetime.now() - o.wait_started_at).total_seconds() / 60)
             
@@ -271,7 +269,7 @@ async def free_orders(call: CallbackQuery):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   ВЗЯТИЕ ЗАКАЗОВ
+#   ВЗЯТИЕ ЗАКАЗА (МУЛЬТИЗАКАЗ)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("courier_take_") & ~F.data.startswith("courier_take_del_"))
 async def take_order(call: CallbackQuery):
@@ -285,7 +283,9 @@ async def take_order(call: CallbackQuery):
             await call.answer("😔 Уже занят или вы не на смене", show_alert=True)
             return
 
-        courier.courier_state = "busy"
+        # Меняем на busy только если он был on
+        if courier.courier_state == "on":
+            courier.courier_state = "busy"
         await session.commit()
 
         o_r = await session.execute(select(Order).where(Order.id == order_id))
@@ -297,15 +297,29 @@ async def take_order(call: CallbackQuery):
 
     fee = int(float(order.courier_fee or 0) + float(order.boost_amount or 0))
     text = (
-        f"✅ <b>Заказ #{order_id} ваш!</b>\n\n🏪 Забрать: {shop.address if shop else '—'}\n"
-        f"🏠 Доставить: {order.address}\n👤 {order.client_name}, {order.client_phone}\n💰 Заработок: {fee} ₽"
+        f"✅ <b>Заказ #{order_id} ваш!</b>\n\n"
+        f"🏪 <b>ЗАБРАТЬ ИЗ:</b>\n  {shop.address if shop else '—'}\n"
+        f"  📞 {shop.phone if shop else '—'}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏠 <b>ДОСТАВИТЬ В:</b>\n  {order.address}\n"
+        f"  👤 {order.client_name}, {order.client_phone}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
+        f"🕒 <b>ВРЕМЯ ДОСТАВКИ:</b> {order.delivery_slot or '—'}\n"
+        f"💰 <b>Заработок:</b> {fee} ₽\n"
     )
+    if order.comment:
+        text += f"💬 <b>Комментарий:</b> {order.comment}\n"
+
     rows = [
         [kb.btn("📦 Забрал", f"courier_picked_{order_id}")],
         [kb.btn("🗺 Маршрут", f"courier_map_{order_id}")],
         [kb.btn("🔙 В меню", "courier_menu")],
     ]
     await call.message.edit_text(text, reply_markup=kb.kb(rows))
+
+    # Обновляем сообщение клиенту
+    await orders_service.update_client_order_message(session, order_id)
 
     if client and client.tg_id:
         try: await bot_client.send_message(client.tg_id, f"🚴 <b>Курьер назначен на заказ #{order_id}</b>\n\n👤 {courier.name}\n⭐ {float(courier.rating or 0):.1f}")
@@ -328,7 +342,8 @@ async def take_delivery(call: CallbackQuery):
             await call.answer("😔 Уже занято", show_alert=True)
             return
 
-        courier.courier_state = "busy"
+        if courier.courier_state == "on":
+            courier.courier_state = "busy"
         await session.commit()
         d_r = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == delivery_id))
         d = d_r.scalar_one_or_none()
@@ -355,7 +370,7 @@ async def take_delivery(call: CallbackQuery):
         except Exception: pass
     await call.answer()
     # ═══════════════════════════════════════════
-#   СТАТУСЫ ЗАКАЗА
+#   СТАТУСЫ ЗАКАЗА (ЗАБРАЛ, У КЛИЕНТА, ДОСТАВЛЕНО)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("courier_picked_") & ~F.data.startswith("courier_del_picked_"))
 async def picked(call: CallbackQuery):
@@ -469,7 +484,7 @@ async def del_done(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   ФОТО ВРУЧЕНИЯ
+#   ПОЛУЧЕНИЕ ФОТО ВРУЧЕНИЯ
 # ═══════════════════════════════════════════
 @router.message(CourierFSM.delivery_photo, F.photo)
 async def receive_delivery_photo(message: Message, state: FSMContext):
@@ -535,12 +550,11 @@ async def complete_delivery_order(message: Message, order_id: int, courier_tg_id
 
         fee = float(order.courier_fee or 0) + float(order.boost_amount or 0)
         
-        # Начисляем бонусы и обновляем уровень
         await bonuses_service.apply_referral_percent(session, courier.id, Decimal(str(fee)))
         await bonuses_service.update_courier_level(session, courier.id)
         await bonuses_service.check_achievements(session, courier.id)
 
-        courier.courier_state = "on" # Возвращаем на смену после заказа
+        courier.courier_state = "on" 
         await session.commit()
         await session.refresh(courier)
 
@@ -593,7 +607,7 @@ async def complete_delivery_shop(message: Message, delivery_id: int, courier_tg_
         except Exception: pass
 
 # ═══════════════════════════════════════════
-#   МАРШРУТ (БАГ #15 ИСПРАВЛЕН)
+#   МАРШРУТЫ (ОДИН И МУЛЬТИ)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("courier_map_"))
 async def map_route(call: CallbackQuery):
@@ -610,31 +624,59 @@ async def map_route(call: CallbackQuery):
         return
 
     points = []
-    # 1. Точка курьера (если есть)
-    if courier.lat and courier.lon:
-        points.append((float(courier.lat), float(courier.lon)))
-    # 2. Точка магазина (если есть)
-    if shop.lat and shop.lon:
-        points.append((float(shop.lat), float(shop.lon)))
-    # 3. Точка клиента (если есть)
-    if order.lat and order.lon:
-        points.append((float(order.lat), float(order.lon)))
+    if courier.lat and courier.lon: points.append((float(courier.lat), float(courier.lon)))
+    if shop.lat and shop.lon: points.append((float(shop.lat), float(shop.lon)))
+    if order.lat and order.lon: points.append((float(order.lat), float(order.lon)))
 
     if len(points) < 2:
-        await call.answer("Недостаточно координат для маршрута", show_alert=True)
+        await call.answer("Недостаточно координат", show_alert=True)
         return
 
     link = helpers.route_link(points)
-    
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
     await call.message.answer(
         "🗺 <b>Маршрут построен!</b>\nНажмите кнопку ниже, чтобы открыть Яндекс.Карты.",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗺 Открыть карту", url=link)]])
     )
     await call.answer()
 
+# МУЛЬТИЗАКАЗ: МАРШРУТ ПО ВСЕМ АКТИВНЫМ ЗАКАЗАМ
+@router.callback_query(F.data == "courier_route_all")
+async def route_all(call: CallbackQuery):
+    async with async_session() as session:
+        courier = await get_courier(session, call.from_user.id)
+        orders = await orders_service.get_courier_active_orders(session, courier.id)
+        
+        if not orders:
+            await call.answer("У вас нет активных заказов", show_alert=True)
+            return
+
+        points = []
+        if courier.lat and courier.lon:
+            points.append((float(courier.lat), float(courier.lon)))
+        
+        for o in orders:
+            shop_r = await session.execute(select(Shop).where(Shop.id == o.shop_id))
+            shop = shop_r.scalar_one_or_none()
+            if shop and shop.lat and shop.lon:
+                points.append((float(shop.lat), float(shop.lon)))
+        
+        for o in orders:
+            if o.lat and o.lon:
+                points.append((float(o.lat), float(o.lon)))
+
+    if len(points) < 2:
+        await call.answer("Недостаточно координат для маршрута", show_alert=True)
+        return
+
+    link = helpers.route_link(points)
+    await call.message.answer(
+        f"🗺 <b>Маршрут по {len(orders)} заказам</b>\n\nСначала заберите букеты из магазинов, затем развезите клиентам.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🗺 Открыть карту", url=link)]])
+    )
+    await call.answer()
+
 # ═══════════════════════════════════════════
-#   БАЛАНС И ВЫВОД (БАГ #8 ИСПРАВЛЕН)
+#   БАЛАНС И ВЫВОД
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_balance")
 async def courier_balance(call: CallbackQuery):
@@ -731,7 +773,7 @@ async def process_withdraw(message: Message, state: FSMContext):
     await message.answer(f"✅ Заявка на вывод {helpers.money(amount)} отправлена.", reply_markup=kb.courier_main_on_shift())
 
 # ═══════════════════════════════════════════
-#   СТАТИСТИКА И ДОСТИЖЕНИЯ
+#   СТАТИСТИКА, ДОСТИЖЕНИЯ, РЕФЕРАЛКА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_stats")
 async def courier_stats(call: CallbackQuery):
@@ -786,9 +828,6 @@ async def achievements(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb.courier_stats_menu())
     await call.answer()
 
-# ═══════════════════════════════════════════
-#   РЕФЕРАЛКА И РЕКВИЗИТЫ
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_referral")
 async def courier_referral(call: CallbackQuery):
     ref_link = helpers.referral_link(call.from_user.id)
@@ -802,6 +841,9 @@ async def ref_copy(call: CallbackQuery):
     await call.message.answer(f"<code>{link}</code>")
     await call.answer("Скопировано")
 
+# ═══════════════════════════════════════════
+#   РЕКВИЗИТЫ
+# ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_requisites")
 async def courier_requisites(call: CallbackQuery):
     async with async_session() as session:
@@ -880,7 +922,7 @@ async def cr_sbp_save(message: Message, state: FSMContext):
     await message.answer("✅ СБП сохранён.", reply_markup=kb.courier_main_on_shift())
 
 # ═══════════════════════════════════════════
-#   АКТИВНЫЕ ЗАКАЗЫ И СВОЯ ДОСТАВКА
+#   АКТИВНЫЕ ЗАКАЗЫ (С МАРШРУТОМ ПО ВСЕМ)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_my_orders")
 async def my_orders(call: CallbackQuery):
@@ -904,6 +946,9 @@ async def my_orders(call: CallbackQuery):
     for d in deliveries:
         text += f"#Д-{d.id} — {d.to_address}\n\n"
         rows.append([kb.btn(f"🚚 Доставка #Д-{d.id}", f"courier_view_del_{d.id}")])
+    
+    if orders:
+        rows.append([kb.btn("🗺 Маршрут по всем", "courier_route_all")])
     rows.append([kb.btn("🔙 В меню", "courier_menu")])
 
     await call.message.edit_text(text, reply_markup=kb.kb(rows))
