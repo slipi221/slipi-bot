@@ -5,7 +5,7 @@ SLIPI — логика заказов
 from datetime import datetime, date
 from decimal import Decimal
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import config
@@ -47,10 +47,7 @@ def calculate_cart_total(items: list, distance_km: float = 0) -> dict:
     }
 
 def calculate_platform_income(items: list, distance_km: float, discount: Decimal) -> Decimal:
-    """
-    ИСПРАВЛЕНО (Баг #5): Платформа берет на себя скидку клиенту.
-    Мы вычитаем скидку из дохода платформы, чтобы баланс сходился.
-    """
+    """Скидка вычитается из дохода платформы."""
     markup_total = Decimal("0")
     for item in items:
         markup_total += Decimal(str(item["product"].markup)) * item["quantity"]
@@ -58,7 +55,6 @@ def calculate_platform_income(items: list, distance_km: float, discount: Decimal
     zone = config.get_delivery_zone(distance_km)
     delivery_income = Decimal(str(zone["platform_gets"])) if zone else Decimal("0")
 
-    # Доход = (Наценка + Доставка платформы) - Скидка клиенту
     income = markup_total + delivery_income - discount
     return max(income, Decimal("0")).quantize(Decimal("0.01"))
 
@@ -156,7 +152,7 @@ async def create_order_from_cart(
             order_id=order.id, product_id=product.id, title=product.title, category=product.category,
             shop_price=product.shop_price, markup=product.markup, client_price=product.client_price,
             quantity=qty, total=Decimal(str(product.client_price)) * qty,
-            photo_id=product.photo_id, # ИСПРАВЛЕНО (Баг #12)
+            photo_id=product.photo_id, # Сохраняем фото
         ))
         product.order_count += qty
 
@@ -173,7 +169,7 @@ async def create_order_from_cart(
     return order
 
 # ═══════════════════════════════════════════
-#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ
+#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ И ОТПРАВКА МАГАЗИНУ
 # ═══════════════════════════════════════════
 async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
@@ -198,26 +194,76 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
 
     await session.commit()
 
-    # ИСПРАВЛЕНО (Баг #4): Уведомление магазину
+    # ── УВЕДОМЛЕНИЕ МАГАЗИНУ ──
     if shop:
         from keyboards import shop_order_new
+        from services.notify import send_notification
+        from aiogram.types import InputMediaPhoto
+        from bots import bot_shop
         
         is_shop_awake = shop.is_on_shift and not shop.is_paused
+        
+        items_r = await session.execute(select(OrderItem).where(OrderItem.order_id == order_id))
+        items = items_r.scalars().all()
+        
+        items_text = ""
+        media = []
+        for it in items:
+            items_text += f"  • {it.title} × {it.quantity} = {helpers.money(it.total)}\n"
+            if it.photo_id:
+                media.append(InputMediaPhoto(media=it.photo_id))
+        
+        pay_status = "✅ <b>ОПЛАЧЕН</b>" if order.payment_status == "confirmed" else "⏳ Ожидает оплаты"
+        
         text = (
-            f"🔔 <b>НОВЫЙ ЗАКАЗ #{order.id}</b>\n\n"
-            f"📍 {order.address}\n👤 {order.client_name}, {order.client_phone}\n"
-            f"📅 {helpers.format_date(order.delivery_date)} | 🕒 {order.delivery_slot or '—'}\n"
-            f"💰 {helpers.money(order.total_price)}"
+            f"🔔 <b>НОВЫЙ ЗАКАЗ #{order.id}</b>\n"
+            f"💳 Статус: {pay_status}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌷 <b>СОСТАВ ЗАКАЗА:</b>\n"
+            f"{items_text}"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📍 <b>КУДА ДОСТАВИТЬ:</b>\n"
+            f"  {order.address}\n"
+            f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
+            f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
+            f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
+            f"🕒 <b>ВРЕМЯ:</b> {order.delivery_slot or '—'}\n"
         )
-        await notify.send_notification(
-            session=session, recipient_type="shop", recipient_id=shop.id, text=text,
-            reply_markup=shop_order_new(order.id).model_dump(exclude_none=True),
-            force_outbox=not is_shop_awake
+        
+        if order.comment:
+            text += f"💬 <b>КОММЕНТАРИЙ:</b> {order.comment}\n"
+        
+        text += f"📸 <b>ФОТО ВРУЧЕНИЯ:</b> {'Да' if order.need_delivery_photo else 'Нет'}\n"
+        
+        # ОСТАВИЛИ ТОЛЬКО СТОИМОСТЬ БУКЕТОВ
+        text += (
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>ФИНАНСЫ:</b>\n"
+            f"  Стоимость букетов: {helpers.money(order.items_total)}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ <i>Примите заказ в течение {config.DAY_ORDER_TIMEOUT_MINUTES} минут.</i>"
         )
+        
+        if is_shop_awake:
+            if media:
+                try:
+                    await bot_shop.send_media_group(chat_id=shop.tg_id, media=media[:10])
+                except Exception: pass
+            
+            try:
+                msg = await bot_shop.send_message(chat_id=shop.tg_id, text=text, reply_markup=shop_order_new(order.id))
+                order.track_message_id = msg.message_id
+                await session.commit()
+            except Exception: pass
+        else:
+            await send_notification(
+                session=session, recipient_type="shop", recipient_id=shop.id, text=text,
+                reply_markup=shop_order_new(order.id).model_dump(exclude_none=True),
+                force_outbox=True
+            )
     return order
-
-# ═══════════════════════════════════════════
-#   ВЗЯТИЕ И СМЕНА СТАТУСА
+    # ═══════════════════════════════════════════
+#   ВЗЯТИЕ ЗАКАЗА (С ОБНОВЛЕНИЕМ СООБЩЕНИЯ МАГАЗИНУ)
 # ═══════════════════════════════════════════
 async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> bool:
     c_result = await session.execute(select(Courier).where(Courier.id == courier_id))
@@ -229,14 +275,83 @@ async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> b
         .values(courier_id=courier_id, status="going", taken_at=datetime.now())
     )
     await session.commit()
-    return result.rowcount == 1
 
+    if result.rowcount != 1:
+        return False
+
+    # ── ОБНОВЛЯЕМ СООБЩЕНИЕ МАГАЗИНУ ──
+    o_result = await session.execute(select(Order).where(Order.id == order_id))
+    order = o_result.scalar_one_or_none()
+    
+    if order and order.track_message_id:
+        s_result = await session.execute(select(Shop).where(Shop.id == order.shop_id))
+        shop = s_result.scalar_one_or_none()
+        
+        if shop:
+            items_r = await session.execute(select(OrderItem).where(OrderItem.order_id == order_id))
+            items = items_r.scalars().all()
+            
+            items_text = ""
+            for it in items:
+                items_text += f"  • {it.title} × {it.quantity} = {helpers.money(it.total)}\n"
+            
+            text = (
+                f"🔔 <b>ЗАКАЗ #{order.id}</b>\n"
+                f"💳 Статус: ✅ <b>ОПЛАЧЕН</b>\n"
+                f"🚴 <b>Курьер назначен</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🌷 <b>СОСТАВ ЗАКАЗА:</b>\n"
+                f"{items_text}"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📍 <b>КУДА ДОСТАВИТЬ:</b>\n"
+                f"  {order.address}\n"
+                f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
+                f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
+                f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
+                f"🕒 <b>ВРЕМЯ:</b> {order.delivery_slot or '—'}\n"
+            )
+            
+            if order.comment:
+                text += f"💬 <b>КОММЕНТАРИЙ:</b> {order.comment}\n"
+            
+            text += (
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🚴 <b>ВАШ КУРЬЕР:</b>\n"
+                f"  👤 {courier.name}\n"
+                f"  📞 {courier.phone}\n"
+                f"  🚗 {courier.transport}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 <b>ФИНАНСЫ:</b>\n"
+                f"  Стоимость букетов: {helpers.money(order.items_total)}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ <i>Курьер уже едет забирать заказ.</i>"
+            )
+            
+            from bots import bot_shop
+            from aiogram.exceptions import TelegramBadRequest
+            
+            try:
+                await bot_shop.edit_message_text(
+                    chat_id=shop.tg_id,
+                    message_id=order.track_message_id,
+                    text=text
+                )
+            except TelegramBadRequest as e:
+                print(f"Не удалось обновить сообщение магазину: {e}")
+    
+    return True
+
+# ═══════════════════════════════════════════
+#   СМЕНА СТАТУСА
+# ═══════════════════════════════════════════
 async def update_order_status(session: AsyncSession, order_id: int, new_status: str):
-    await session.execute(update(Order).where(Order.id == order_id).values(status=new_status))
+    await session.execute(
+        update(Order).where(Order.id == order_id).values(status=new_status)
+    )
     await session.commit()
 
 # ═══════════════════════════════════════════
-#   ЗАВЕРШЕНИЕ ЗАКАЗА
+#   ЗАВЕРШЕНИЕ ЗАКАЗА (С БУСТОМ)
 # ═══════════════════════════════════════════
 async def complete_order(session: AsyncSession, order_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
@@ -246,7 +361,7 @@ async def complete_order(session: AsyncSession, order_id: int):
     order.status = "done"
     order.delivered_at = datetime.now()
 
-    # Курьеру (с учетом буста)
+    # Курьеру (с учетом буста за срочность)
     courier_fee = Decimal(str(order.courier_fee or 0))
     courier_fee += Decimal(str(order.boost_amount or 0))
 
@@ -254,13 +369,17 @@ async def complete_order(session: AsyncSession, order_id: int):
     order_items = items_result.scalars().all()
     shop_sum = sum(Decimal(str(oi.shop_price)) * oi.quantity for oi in order_items)
 
+    # Начисляем магазину
     await session.execute(update(Shop).where(Shop.id == order.shop_id).values(balance=Shop.balance + shop_sum))
 
+    # Начисляем курьеру
     if order.courier_id:
         await session.execute(
             update(Courier).where(Courier.id == order.courier_id)
             .values(balance=Courier.balance + courier_fee, total_orders=Courier.total_orders + 1)
         )
+        
+        # Обновляем статистику за день (для бонусов)
         today_stat = await session.execute(
             select(CourierDailyStat).where(CourierDailyStat.courier_id == order.courier_id, CourierDailyStat.date == date.today())
         )
@@ -271,6 +390,7 @@ async def complete_order(session: AsyncSession, order_id: int):
         else:
             session.add(CourierDailyStat(courier_id=order.courier_id, date=date.today(), completed_orders=1, earned=courier_fee))
 
+    # Пишем транзакции
     session.add(Transaction(user_type="shop", user_id=order.shop_id, amount=shop_sum, type="order_payment", order_id=order_id))
     if order.courier_id:
         session.add(Transaction(user_type="courier", user_id=order.courier_id, amount=courier_fee, type="order_payment", order_id=order_id))
@@ -280,49 +400,105 @@ async def complete_order(session: AsyncSession, order_id: int):
     return order
 
 # ═══════════════════════════════════════════
-#   ОТМЕНА И РЕДАКТИРОВАНИЕ
+#   ОТМЕНА ЗАКАЗА (С ВОЗВРАТОМ)
 # ═══════════════════════════════════════════
-async def cancel_order(session: AsyncSession, order_id: int, reason: str = None, cancelled_by: str = "shop", refund: bool = True):
+async def cancel_order(
+    session: AsyncSession,
+    order_id: int,
+    reason: str = None,
+    cancelled_by: str = "shop",
+    refund: bool = True,
+):
     result = await session.execute(select(Order).where(Order.id == order_id))
     order = result.scalar_one_or_none()
-    if not order or order.status in ("picked", "delivering", "at_client", "done"): return None
+    if not order: return None
+
+    # Запрет отмены, если курьер уже забрал
+    if order.status in ("picked", "delivering", "at_client", "done"):
+        return None
 
     order.status = "cancel"
     order.cancel_reason = reason
     order.cancelled_by = cancelled_by
 
     if refund and order.payment_status == "confirmed":
-        await session.execute(update(Client).where(Client.id == order.client_id).values(balance=Client.balance + order.total_price))
-        session.add(Transaction(user_type="client", user_id=order.client_id, amount=order.total_price, type="refund", order_id=order_id))
+        await session.execute(
+            update(Client).where(Client.id == order.client_id)
+            .values(balance=Client.balance + order.total_price)
+        )
+        session.add(Transaction(
+            user_type="client", user_id=order.client_id,
+            amount=order.total_price, type="refund", order_id=order_id,
+        ))
         order.payment_status = "refunded"
 
+    # Если отменил магазин — повышаем счетчик отказов
     if cancelled_by == "shop":
-        await session.execute(update(Shop).where(Shop.id == order.shop_id).values(rejected_count=Shop.rejected_count + 1))
+        await session.execute(
+            update(Shop).where(Shop.id == order.shop_id)
+            .values(rejected_count=Shop.rejected_count + 1)
+        )
 
     await session.commit()
     return order
 
+# ═══════════════════════════════════════════
+#   РЕДАКТИРОВАНИЕ И ПОИСК
+# ═══════════════════════════════════════════
 async def edit_order_field(session: AsyncSession, order_id: int, field: str, new_value, changed_by: str, changed_by_id: int) -> bool:
     result = await session.execute(select(Order).where(Order.id == order_id))
     order = result.scalar_one_or_none()
-    if not order or order.status in ("picked", "delivering", "at_client", "done", "cancel"): return False
+    if not order or order.status in ("picked", "delivering", "at_client", "done", "cancel"):
+        return False
 
     old_value = getattr(order, field, None)
     setattr(order, field, new_value)
-    session.add(ChangeLog(object_type="order", object_id=order_id, field=field, old_value=str(old_value) if old_value else None, new_value=str(new_value), changed_by=changed_by, changed_by_id=changed_by_id))
+
+    session.add(ChangeLog(
+        object_type="order", object_id=order_id, field=field,
+        old_value=str(old_value) if old_value else None, new_value=str(new_value),
+        changed_by=changed_by, changed_by_id=changed_by_id,
+    ))
+
     await session.commit()
     return True
 
 async def edit_delivery_field(session: AsyncSession, delivery_id: int, field: str, new_value, changed_by: str, changed_by_id: int) -> bool:
     result = await session.execute(select(DeliveryOrder).where(DeliveryOrder.id == delivery_id))
     d = result.scalar_one_or_none()
-    if not d or d.status in ("picked", "at_client", "done", "cancel"): return False
+    if not d or d.status in ("picked", "at_client", "done", "cancel"):
+        return False
 
     old_value = getattr(d, field, None)
     setattr(d, field, new_value)
-    session.add(ChangeLog(object_type="delivery", object_id=delivery_id, field=field, old_value=str(old_value) if old_value else None, new_value=str(new_value), changed_by=changed_by, changed_by_id=changed_by_id))
+
+    session.add(ChangeLog(
+        object_type="delivery", object_id=delivery_id, field=field,
+        old_value=str(old_value) if old_value else None, new_value=str(new_value),
+        changed_by=changed_by, changed_by_id=changed_by_id,
+    ))
+
     await session.commit()
     return True
+
+async def find_alternative_shop(session: AsyncSession, order_id: int) -> int | None:
+    items_result = await session.execute(select(OrderItem).where(OrderItem.order_id == order_id))
+    items = items_result.scalars().all()
+    if not items: return None
+
+    first_product_result = await session.execute(select(Product).where(Product.id == items[0].product_id))
+    first_product = first_product_result.scalar_one_or_none()
+    if not first_product: return None
+
+    result = await session.execute(
+        select(Product).where(
+            Product.title == first_product.title, Product.category == first_product.category,
+            Product.is_active == True, Product.shop_id != first_product.shop_id,
+        ).limit(1)
+    )
+    alt = result.scalar_one_or_none()
+    if alt: return alt.shop_id
+    return None
 
 # ═══════════════════════════════════════════
 #   ПОЛУЧЕНИЕ ЗАКАЗОВ
@@ -352,7 +528,9 @@ async def get_courier_active_orders(session: AsyncSession, courier_id: int):
 #   ПОВТОРИТЬ ЗАКАЗ
 # ═══════════════════════════════════════════
 async def repeat_order(session: AsyncSession, order_id: int, client_id: int) -> dict:
+    from sqlalchemy import delete
     await session.execute(delete(CartItem).where(CartItem.client_id == client_id))
+
     items_result = await session.execute(select(OrderItem).where(OrderItem.order_id == order_id))
     items = items_result.scalars().all()
 
@@ -368,3 +546,4 @@ async def repeat_order(session: AsyncSession, order_id: int, client_id: int) -> 
 
     await session.commit()
     return {"ok": added > 0, "added": added, "skipped": skipped}
+    
