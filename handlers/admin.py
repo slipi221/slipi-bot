@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — бот админа
+Flowers Express — бот админа
 """
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -128,7 +128,7 @@ async def req_shops(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_shop_ok_"))
 async def shop_ok(call: CallbackQuery):
-    shop_id = int(call.data.split("_")[3])
+    shop_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Shop).where(Shop.id == shop_id))
         shop = r.scalar_one_or_none()
@@ -152,7 +152,7 @@ async def shop_ok(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_shop_no_"))
 async def shop_no(call: CallbackQuery):
-    shop_id = int(call.data.split("_")[3])
+    shop_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Shop).where(Shop.id == shop_id))
         shop = r.scalar_one_or_none()
@@ -184,7 +184,7 @@ async def req_couriers(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_cour_ok_"))
 async def cour_ok(call: CallbackQuery):
-    courier_id = int(call.data.split("_")[3])
+    courier_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Courier).where(Courier.id == courier_id))
         c = r.scalar_one_or_none()
@@ -201,7 +201,7 @@ async def cour_ok(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_cour_no_"))
 async def cour_no(call: CallbackQuery):
-    courier_id = int(call.data.split("_")[3])
+    courier_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Courier).where(Courier.id == courier_id))
         c = r.scalar_one_or_none()
@@ -241,12 +241,12 @@ async def admin_shops_page(call: CallbackQuery, page: int):
 
 @router.callback_query(F.data.startswith("admin_shops_page_"))
 async def admin_shops_page_route(call: CallbackQuery):
-    page = int(call.data.split("_")[3])
+    page = int(call.data.split("_")[-1])
     await admin_shops_page(call, page)
 
 @router.callback_query(F.data.startswith("admin_shop_view_"))
 async def admin_shop_view(call: CallbackQuery):
-    shop_id = int(call.data.split("_")[3])
+    shop_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Shop).where(Shop.id == shop_id))
         shop = r.scalar_one_or_none()
@@ -267,7 +267,7 @@ async def admin_shop_view(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_shop_block_"))
 async def admin_shop_block(call: CallbackQuery):
-    shop_id = int(call.data.split("_")[3])
+    shop_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Shop).where(Shop.id == shop_id))
         shop = r.scalar_one_or_none()
@@ -283,7 +283,7 @@ async def admin_shop_block(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("admin_shop_unblock_"))
 async def admin_shop_unblock(call: CallbackQuery):
-    shop_id = int(call.data.split("_")[3])
+    shop_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Shop).where(Shop.id == shop_id))
         shop = r.scalar_one_or_none()
@@ -296,7 +296,139 @@ async def admin_shop_unblock(call: CallbackQuery):
     await log_action(f"Магазин #{shop_id} разблокирован")
     await call.answer("✅ Разблокирован", show_alert=True)
     await admin_shop_view(call)
-    # ═══════════════════════════════════════════
+
+@router.callback_query(F.data.startswith("admin_shop_stats_"))
+async def admin_shop_stats(call: CallbackQuery):
+    shop_id = int(call.data.split("_")[-1])
+    async with async_session() as session:
+        orders_r = await session.execute(select(Order).where(Order.shop_id == shop_id).order_by(Order.id.desc()))
+        orders = orders_r.scalars().all()
+
+    done = sum(1 for o in orders if o.status == "done")
+    cancel = sum(1 for o in orders if o.status == "cancel")
+    wait = sum(1 for o in orders if o.status == "wait")
+    total_sum = sum(float(o.total_price) for o in orders if o.status == "done")
+
+    text = f"📊 <b>Статистика магазина</b>\n\n📦 Всего: {len(orders)}\n✅ Доставлено: {done}\n❌ Отменено: {cancel}\n⏳ В работе: {wait}\n\n💰 Оборот: {helpers.money(total_sum)}"
+    await call.message.edit_text(text, reply_markup=kb.admin_back(f"admin_shop_view_{shop_id}"))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("admin_shop_msg_"))
+async def admin_shop_msg(call: CallbackQuery, state: FSMContext):
+    shop_id = int(call.data.split("_")[-1])
+    await state.update_data(msg_target_type="shop", msg_target_id=shop_id)
+    await state.set_state(AdminFSM.reply_to_client)
+    await call.message.edit_text("✉️ Введите сообщение:", reply_markup=kb.admin_cancel())
+    await call.answer()
+
+@router.callback_query(F.data.startswith("admin_shop_topup_"))
+async def shop_topup_start(call: CallbackQuery, state: FSMContext):
+    shop_id = int(call.data.split("_")[-1])
+    await state.update_data(topup_shop_id=shop_id, topup_cour_id=None)
+    await state.set_state(AdminFSM.topup_amount)
+    await call.message.edit_text("💰 <b>Пополнение баланса магазина</b>\n\nВведите сумму:", reply_markup=kb.admin_cancel())
+    await call.answer()
+
+@router.message(AdminFSM.topup_amount)
+async def shop_topup_apply(message: Message, state: FSMContext):
+    data = await state.get_data()
+    if data.get("topup_cour_id"): return 
+    
+    shop_id = data.get("topup_shop_id")
+    if not shop_id: return
+
+    try:
+        amount = Decimal(message.text.replace(",", ".").strip())
+        if amount <= 0: raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите число больше 0.")
+        return
+
+    async with async_session() as session:
+        r = await session.execute(select(Shop).where(Shop.id == shop_id))
+        shop = r.scalar_one_or_none()
+        if not shop:
+            await message.answer("❌ Не найден.")
+            await state.clear()
+            return
+
+        await payments_service.topup_shop_balance(session, shop_id, amount)
+
+        if shop.tg_id:
+            try: await bot_shop.send_message(shop.tg_id, f"💰 Баланс пополнен на {helpers.money(amount)}")
+            except Exception: pass
+
+    await log_action(f"Магазин #{shop_id} пополнен на {amount} ₽")
+    await state.clear()
+    await message.answer("✅ Баланс пополнен.", reply_markup=kb.admin_main())
+
+@router.callback_query(F.data.startswith("admin_shop_edit_"))
+async def admin_shop_edit(call: CallbackQuery):
+    shop_id = int(call.data.split("_")[-1])
+    await call.message.edit_text("✏️ <b>Что изменить?</b>", reply_markup=kb.admin_shop_edit_menu(shop_id))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("ase_"))
+async def ase_field_start(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    field = parts[1]
+    shop_id = int(parts[-1])
+
+    field_names = {"name": "название", "address": "адрес", "phone": "телефон", "geo": "гео"}
+    await state.update_data(ase_shop_id=shop_id, ase_field=field)
+    await state.set_state(AdminFSM.ase_field)
+
+    if field == "geo":
+        await call.message.edit_text("📍 Отправьте геолокацию:", reply_markup=kb.admin_cancel())
+    else:
+        await call.message.edit_text(f"✏️ Введите {field_names.get(field, field)}:", reply_markup=kb.admin_cancel())
+    await call.answer()
+
+@router.message(AdminFSM.ase_field, F.location)
+async def ase_field_geo_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    shop_id = data.get("ase_shop_id")
+    if data.get("ase_field") != "geo": return
+    async with async_session() as session:
+        r = await session.execute(select(Shop).where(Shop.id == shop_id))
+        shop = r.scalar_one_or_none()
+        if shop:
+            shop.lat = message.location.latitude
+            shop.lon = message.location.longitude
+            await session.commit()
+    await state.clear()
+    await message.answer("✅ Гео обновлено.", reply_markup=kb.admin_main())
+
+@router.message(AdminFSM.ase_field)
+async def ase_field_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    shop_id = data.get("ase_shop_id")
+    field = data.get("ase_field")
+
+    field_map = {"name": "name", "address": "address", "phone": "phone"}
+    db_field = field_map.get(field)
+    if not db_field:
+        await state.clear()
+        return
+
+    value = message.text.strip()
+    if field == "phone":
+        if not helpers.is_valid_phone(value):
+            await message.answer("❌ Неверный номер.")
+            return
+        value = helpers.clean_phone(value)
+
+    async with async_session() as session:
+        r = await session.execute(select(Shop).where(Shop.id == shop_id))
+        shop = r.scalar_one_or_none()
+        if shop:
+            setattr(shop, db_field, value)
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Обновлено.", reply_markup=kb.admin_main())
+
+# ═══════════════════════════════════════════
 #   КУРЬЕРЫ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_couriers")
@@ -443,7 +575,53 @@ async def cour_topup_apply(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Баланс пополнен.", reply_markup=kb.admin_main())
 
-# ═══════════════════════════════════════════
+@router.callback_query(F.data.startswith("admin_cour_edit_"))
+async def admin_cour_edit(call: CallbackQuery):
+    courier_id = int(call.data.split("_")[-1])
+    await call.message.edit_text("✏️ <b>Что изменить?</b>", reply_markup=kb.admin_courier_edit_menu(courier_id))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("ace_"))
+async def ace_field_start(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split("_")
+    field = parts[1]
+    courier_id = int(parts[-1])
+
+    field_names = {"name": "имя", "phone": "телефон", "city": "город", "transport": "транспорт"}
+    await state.update_data(ace_courier_id=courier_id, ace_field=field)
+    await state.set_state(AdminFSM.ace_field)
+    await call.message.edit_text(f"✏️ Введите {field_names.get(field, field)}:", reply_markup=kb.admin_cancel())
+    await call.answer()
+
+@router.message(AdminFSM.ace_field)
+async def ace_field_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    courier_id = data.get("ace_courier_id")
+    field = data.get("ace_field")
+
+    field_map = {"name": "name", "phone": "phone", "city": "city", "transport": "transport"}
+    db_field = field_map.get(field)
+    if not db_field:
+        await state.clear()
+        return
+
+    value = message.text.strip()
+    if field == "phone":
+        if not helpers.is_valid_phone(value):
+            await message.answer("❌ Неверный номер.")
+            return
+        value = helpers.clean_phone(value)
+
+    async with async_session() as session:
+        r = await session.execute(select(Courier).where(Courier.id == courier_id))
+        c = r.scalar_one_or_none()
+        if c:
+            setattr(c, db_field, value)
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Обновлено.", reply_markup=kb.admin_main())
+    # ═══════════════════════════════════════════
 #   ПЛАТЕЖИ И ВЫПЛАТЫ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_payments")
@@ -672,13 +850,20 @@ async def payout_no(call: CallbackQuery):
     await log_action(f"Выплата #{payout_id} отклонена")
     await call.message.edit_text(f"❌ Выплата #{payout_id} отклонена.")
     await call.answer()
-    # ═══════════════════════════════════════════
-#   КОНТРОЛЬ ДОСТАВКИ (С РАСКЛАДКОЙ)
+
+# ═══════════════════════════════════════════
+#   КОНТРОЛЬ ДОСТАВКИ (ФИНАНСОВАЯ РАСКЛАДКА)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_delivery_control")
 async def admin_delivery_control(call: CallbackQuery):
     async with async_session() as session:
-        r = await session.execute(select(Order).where(Order.status == "wait", Order.payment_status == "confirmed", Order.courier_id.is_(None)))
+        r = await session.execute(
+            select(Order).where(
+                Order.status == "wait",
+                Order.payment_status == "confirmed",
+                Order.courier_id.is_(None),
+            )
+        )
         orders = r.scalars().all()
 
     if not orders:
@@ -689,7 +874,7 @@ async def admin_delivery_control(call: CallbackQuery):
     stuck = []
     for o in orders:
         if o.wait_started_at:
-            elapsed = int((datetime.now() - o.wait_started_at).total_seconds() / 60)
+            elapsed = int((helpers.now_moscow() - o.wait_started_at).total_seconds() / 60)
             if elapsed > 15:
                 stuck.append((o, elapsed))
 
@@ -712,18 +897,22 @@ async def admin_delivery_control_details(call: CallbackQuery):
         o_r = await session.execute(select(Order).where(Order.id == order_id))
         order = o_r.scalar_one_or_none()
         if not order: return
+        
         shop_r = await session.execute(select(Shop).where(Shop.id == order.shop_id))
         shop = shop_r.scalar_one_or_none()
+        
         courier = None
         if order.courier_id:
             cr = await session.execute(select(Courier).where(Courier.id == order.courier_id))
             courier = cr.scalar_one_or_none()
+            
         items_r = await session.execute(select(OrderItem).where(OrderItem.order_id == order_id))
         items = items_r.scalars().all()
 
     items_text = ""
-    shop_sum = Decimal("0")
-    markup_sum = Decimal("0")
+    shop_sum = Decimal("0.00")
+    markup_sum = Decimal("0.00")
+    
     for it in items:
         items_text += f"  • {helpers.escape(it.title)} × {it.quantity} = {helpers.money(it.total)}\n"
         shop_sum += Decimal(str(it.shop_price)) * it.quantity
@@ -733,6 +922,7 @@ async def admin_delivery_control_details(call: CallbackQuery):
     courier_fee = Decimal(str(order.courier_fee or 0))
     boost = Decimal(str(order.boost_amount or 0))
     discount = Decimal(str(order.discount or 0))
+    
     delivery_commission = delivery_fee - courier_fee
     platform_net = markup_sum + delivery_commission - discount
 
@@ -749,9 +939,13 @@ async def admin_delivery_control_details(call: CallbackQuery):
         f"📅 <b>Дата:</b> {helpers.format_date(order.delivery_date)}\n"
         f"🕒 <b>Время доставки:</b> {order.delivery_slot}\n"
     )
-    if order.comment: text += f"💬 <b>Коммент:</b> {helpers.escape(order.comment)}\n"
-    if courier: text += f"━━━━━━━━━━━━━━━━━━━━━━\n🚴 <b>Курьер:</b> {helpers.escape(courier.name)} ({courier.phone})\n"
-    else: text += f"━━━━━━━━━━━━━━━━━━━━━━\n🚴 <b>Курьер:</b> не назначен\n"
+    if order.comment:
+        text += f"💬 <b>Коммент:</b> {helpers.escape(order.comment)}\n"
+    
+    if courier:
+        text += f"━━━━━━━━━━━━━━━━━━━━━━\n🚴 <b>Курьер:</b> {helpers.escape(courier.name)} ({courier.phone})\n"
+    else:
+        text += f"━━━━━━━━━━━━━━━━━━━━━━\n🚴 <b>Курьер:</b> не назначен\n"
 
     text += (
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -760,14 +954,31 @@ async def admin_delivery_control_details(call: CallbackQuery):
         f"   • За букеты: {helpers.money(order.items_total)}\n"
         f"   • За доставку: {helpers.money(delivery_fee)}\n"
     )
-    if discount > 0: text += f"   • Скидка: -{helpers.money(discount)}\n"
-    text += f"\n🏪 <b>Магазин получает:</b> {helpers.money(shop_sum)}\n🚴 <b>Курьер получает:</b> {helpers.money(courier_fee)}"
-    if boost > 0: text += f" + {helpers.money(boost)} (буст)"
-    text += f"\n\n💰 <b>ПЛАТФОРМА (ВЫ):</b>\n   • Наценка: +{helpers.money(markup_sum)}\n   • Комиссия доставки: +{helpers.money(delivery_commission)}\n"
-    if discount > 0: text += f"   • Оплата скидки: -{helpers.money(discount)}\n"
-    if boost > 0: text += f"   • Оплата буста: -{helpers.money(boost)}\n"
-    text += f"   ━━━━━━━━━━━━━━━━━━━━━━\n   <b>ЧИСТАЯ ПРИБЫЛЬ: {helpers.money(platform_net - boost)}</b>\n"
-
+    if discount > 0:
+        text += f"   • Скидка: -{helpers.money(discount)}\n"
+    
+    text += (
+        f"\n🏪 <b>Магазин получает:</b> {helpers.money(shop_sum)}\n"
+        f"🚴 <b>Курьер получает:</b> {helpers.money(courier_fee)}"
+    )
+    if boost > 0:
+        text += f" + {helpers.money(boost)} (буст)"
+    
+    text += (
+        f"\n\n💰 <b>ПЛАТФОРМА (ВЫ):</b>\n"
+        f"   • Наценка на товары: +{helpers.money(markup_sum)}\n"
+        f"   • Комиссия с доставки: +{helpers.money(delivery_commission)}\n"
+    )
+    if discount > 0:
+        text += f"   • Оплата скидки: -{helpers.money(discount)}\n"
+    if boost > 0:
+        text += f"   • Оплата буста: -{helpers.money(boost)}\n"
+    
+    text += (
+        f"   ━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"   <b>ЧИСТАЯ ПРИБЫЛЬ: {helpers.money(platform_net - boost)}</b>\n"
+    )
+    
     await call.message.edit_text(text, reply_markup=kb.admin_delivery_control(order_id, show_details=True))
     await call.answer()
 
@@ -782,9 +993,11 @@ async def admin_boost_set(call: CallbackQuery):
     parts = call.data.split("_")
     order_id = int(parts[-2])
     amount = float(parts[-1])
+
     async with async_session() as session:
         await session.execute(update(Order).where(Order.id == order_id).values(boost_amount=Order.boost_amount + amount))
         await session.commit()
+
     await log_action(f"Boost +{amount} ₽ на #{order_id}")
     await call.message.edit_text(f"✅ Ставка поднята на {amount} ₽.")
     await call.answer()
@@ -805,11 +1018,14 @@ async def admin_boost_custom_save(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите число > 0.")
         return
+
     data = await state.get_data()
     order_id = data.get("boost_order_id")
+
     async with async_session() as session:
         await session.execute(update(Order).where(Order.id == order_id).values(boost_amount=Order.boost_amount + amount))
         await session.commit()
+
     await state.clear()
     await message.answer(f"✅ Ставка поднята на {amount} ₽.", reply_markup=kb.admin_main())
 
@@ -828,44 +1044,64 @@ async def admin_cancel_order(call: CallbackQuery):
 @router.callback_query(F.data.startswith("admin_kpi_"))
 async def admin_kpi(call: CallbackQuery):
     period = call.data.replace("admin_kpi_", "")
-    now = datetime.now()
+    now = helpers.now_moscow()
     if period == "today": since = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elif period == "week": since = now - timedelta(days=7)
     else: since = now - timedelta(days=30)
+
     async with async_session() as session:
         r = await session.execute(select(Order).where(Order.delivered_at >= since, Order.status == "done"))
         orders = r.scalars().all()
+
     if not orders:
         await call.message.edit_text("📊 Нет данных за этот период.", reply_markup=kb.admin_kpi_menu())
         await call.answer()
         return
-    on_time = 0; delay_5_10 = 0; delay_10_15 = 0; delay_15_30 = 0; delay_30 = 0; urgent_count = 0
+
+    on_time = 0
+    delay_5_10 = 0
+    delay_10_15 = 0
+    delay_15_30 = 0
+    delay_30 = 0
+    urgent_count = 0
+
     for o in orders:
         if not o.delivery_slot: continue
         try:
             end_time_str = o.delivery_slot.split("-")[1]
             h, m = map(int, end_time_str.split(":"))
             slot_end = o.delivered_at.replace(hour=h, minute=m, second=0, microsecond=0)
-            if o.created_at and (slot_end - o.created_at).total_seconds() < 7200: urgent_count += 1
+            
+            if o.created_at and (slot_end - o.created_at).total_seconds() < 7200:
+                urgent_count += 1
+
             diff_min = (o.delivered_at - slot_end).total_seconds() / 60
+            
             if diff_min <= 5: on_time += 1
             elif diff_min <= 10: delay_5_10 += 1
             elif diff_min <= 15: delay_10_15 += 1
             elif diff_min <= 30: delay_15_30 += 1
             else: delay_30 += 1
         except Exception: pass
+
     total = len(orders)
     percent = (on_time / total * 100) if total > 0 else 0
+
     text = (
-        f"📈 <b>KPI / SLA Доставки</b>\n\nФизически доставлено: {total}\nВовремя: {on_time} ({percent:.1f}%)\n\n"
-        f"<b>Разбивка задержек:</b>\n🟢 до 5 мин: {on_time}\n🟡 5–10 мин: {delay_5_10}\n"
-        f"🟠 10–15 мин: {delay_10_15}\n🔴 15–30 мин: {delay_15_30}\n🚨 >30 мин: {delay_30}\n\n"
+        f"📈 <b>KPI / SLA Доставки</b>\n\n"
+        f"Физически доставлено: {total}\n"
+        f"Вовремя: {on_time} ({percent:.1f}%)\n\n"
+        f"<b>Разбивка задержек:</b>\n"
+        f"🟢 до 5 мин: {on_time}\n"
+        f"🟡 5–10 мин: {delay_5_10}\n"
+        f"🟠 10–15 мин: {delay_10_15}\n"
+        f"🔴 15–30 мин: {delay_15_30}\n"
+        f"🚨 >30 мин: {delay_30}\n\n"
         f"⚡ Срочных заказов: {urgent_count}"
     )
     await call.message.edit_text(text, reply_markup=kb.admin_kpi_menu())
     await call.answer()
-
-# ═══════════════════════════════════════════
+    # ═══════════════════════════════════════════
 #   ПРОМОКОДЫ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_promos")
@@ -875,16 +1111,20 @@ async def admin_promos(call: CallbackQuery):
     if not has_perm(perms, "settings"):
         await call.answer("Нет доступа", show_alert=True)
         return
+
     async with async_session() as session:
         result = await session.execute(select(Promo).order_by(Promo.id.desc()).limit(20))
         promos = result.scalars().all()
-    if not promos: text = "🎁 Промокодов нет."
+
+    if not promos:
+        text = "🎁 Промокодов нет."
     else:
         text = f"🎁 <b>Промокоды ({len(promos)})</b>\n\n"
         for p in promos:
             d = f"{int(p.discount_value)}%" if p.discount_type == "percent" else helpers.money(p.discount_value)
             status = "✅" if p.is_active else "⏸"
             text += f"{status} <code>{p.code}</code> — {d} — {p.used_count}/{p.max_uses or '∞'}\n"
+
     promos_data = [{"id": p.id, "code": p.code, "discount_text": f"{int(p.discount_value)}%" if p.discount_type == "percent" else helpers.money(p.discount_value), "is_active": p.is_active} for p in promos[:8]]
     await call.message.edit_text(text, reply_markup=kb.admin_promo_list(promos_data))
     await call.answer()
@@ -901,11 +1141,13 @@ async def promo_set_code(message: Message, state: FSMContext):
     if not code.isalnum():
         await message.answer("❌ Только буквы и цифры.")
         return
+
     async with async_session() as session:
         r = await session.execute(select(Promo).where(Promo.code == code))
         if r.scalar_one_or_none():
             await message.answer("❌ Такой код уже есть.")
             return
+
     await state.update_data(promo_code=code)
     await state.set_state(AdminFSM.promo_type)
     await message.answer("🎁 Шаг 2/4: Тип скидки:", reply_markup=kb.admin_promo_type())
@@ -927,6 +1169,7 @@ async def promo_set_value(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите число > 0.")
         return
+
     await state.update_data(discount_value=value)
     await state.set_state(AdminFSM.promo_uses)
     await message.answer("🎁 Шаг 4/4: Лимит использований\n\nЧисло или 0 (безлимит):", reply_markup=kb.admin_cancel())
@@ -937,10 +1180,12 @@ async def promo_set_uses(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Введите целое число.")
         return
+
     data = await state.get_data()
     async with async_session() as session:
         session.add(Promo(code=data["promo_code"], discount_type=data["discount_type"], discount_value=data["discount_value"], max_uses=max_uses, is_active=True))
         await session.commit()
+
     await log_action(f"Промокод {data['promo_code']} создан")
     await state.clear()
     d = f"{int(data['discount_value'])}%" if data["discount_type"] == "percent" else helpers.money(data["discount_value"])
@@ -964,8 +1209,9 @@ async def promo_delete(call: CallbackQuery):
             await log_action(f"Промокод {promo.code} отключён")
     await call.answer("🗑 Отключён", show_alert=True)
     await admin_promos(call)
-    # ═══════════════════════════════════════════
-#   ЖАЛОБЫ И РАССЫЛКА
+
+# ═══════════════════════════════════════════
+#   ЖАЛОБЫ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_complaints")
 async def admin_complaints(call: CallbackQuery):
@@ -1027,6 +1273,9 @@ async def admin_comp_reject(call: CallbackQuery):
     await call.answer("❌ Отклонено", show_alert=True)
     await admin_complaints(call)
 
+# ═══════════════════════════════════════════
+#   РАССЫЛКА
+# ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast(call: CallbackQuery):
     await call.message.edit_text("📢 <b>Рассылка</b>\n\nКому?", reply_markup=kb.admin_broadcast_menu())
@@ -1052,6 +1301,7 @@ async def admin_bc_text(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "admin_bc_send", AdminFSM.broadcast_confirm)
 async def admin_bc_send(call: CallbackQuery, state: FSMContext):
+    import asyncio
     data = await state.get_data()
     target, text = data.get("bc_target"), data.get("bc_text")
 
@@ -1073,9 +1323,11 @@ async def admin_bc_send(call: CallbackQuery, state: FSMContext):
     sent, failed = 0, 0
     for uid in ids:
         try:
-            await bot.send_message(uid, f"📢 <b>Сообщение от SLIPI:</b>\n\n{text}")
+            await bot.send_message(uid, f"📢 <b>Сообщение от Flowers Express:</b>\n\n{text}")
             sent += 1
-        except Exception: failed += 1
+            await asyncio.sleep(0.05) # ЗАЩИТА ОТ СПАМА (П. 96)
+        except Exception: 
+            failed += 1
 
     await log_action(f"Рассылка ({target}): {sent}")
     await state.clear()
@@ -1083,7 +1335,7 @@ async def admin_bc_send(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   АНАЛИТИКА, НАСТРОЙКИ И МУЛЬТИАДМИН
+#   АНАЛИТИКА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_analytics")
 async def admin_analytics(call: CallbackQuery):
@@ -1093,7 +1345,7 @@ async def admin_analytics(call: CallbackQuery):
 @router.callback_query(F.data.startswith("admin_analytics_") & ~F.data.startswith("admin_analytics_menu"))
 async def admin_analytics_period(call: CallbackQuery):
     period = call.data.replace("admin_analytics_", "")
-    now = datetime.now()
+    now = helpers.now_moscow()
     if period == "today": since, label = now.replace(hour=0, minute=0, second=0, microsecond=0), "Сегодня"
     elif period == "week": since, label = now - timedelta(days=7), "За неделю"
     elif period == "month": since, label = now - timedelta(days=30), "За месяц"
@@ -1165,6 +1417,9 @@ async def admin_shifts_dashboard(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb.admin_back("admin_analytics"))
     await call.answer()
 
+# ═══════════════════════════════════════════
+#   НАСТРОЙКИ, МУЛЬТИАДМИН, ЛОГИ
+# ═══════════════════════════════════════════
 @router.callback_query(F.data == "admin_settings")
 async def admin_settings(call: CallbackQuery):
     async with async_session() as session:
@@ -1406,7 +1661,7 @@ async def admin_logs_clear(call: CallbackQuery):
     await admin_logs(call)
 
 # ═══════════════════════════════════════════
-#   ОТПРАВКА СООБЩЕНИЯ ОТ АДМИНА
+#   ОТПРАВКА СООБЩЕНИЯ (ОТ АДМИНА)
 # ═══════════════════════════════════════════
 @router.message(AdminFSM.reply_to_client)
 async def admin_send_message(message: Message, state: FSMContext):
@@ -1415,8 +1670,7 @@ async def admin_send_message(message: Message, state: FSMContext):
     tid = data.get("msg_target_id")
     text = message.text.strip()
 
-    target_id = None
-    bot = None
+    target_id, bot = None, None
 
     async with async_session() as session:
         if ttype == "shop":
