@@ -47,7 +47,6 @@ def calculate_cart_total(items: list, distance_km: float = 0) -> dict:
     }
 
 def calculate_platform_income(items: list, distance_km: float, discount: Decimal) -> Decimal:
-    """Скидка вычитается из дохода платформы."""
     markup_total = Decimal("0")
     for item in items:
         markup_total += Decimal(str(item["product"].markup)) * item["quantity"]
@@ -132,7 +131,6 @@ async def create_order_from_cart(
     platform_income = calculate_platform_income(items, distance_km, total_discount)
     is_preorder = delivery_date > date.today()
 
-    # Статус "pending" = ожидает оплаты
     order = Order(
         client_id=client_id, shop_id=shop_id, status="pending", payment_status="pending",
         address=address, client_name=client_name, client_phone=client_phone, comment=comment,
@@ -152,7 +150,7 @@ async def create_order_from_cart(
             order_id=order.id, product_id=product.id, title=product.title, category=product.category,
             shop_price=product.shop_price, markup=product.markup, client_price=product.client_price,
             quantity=qty, total=Decimal(str(product.client_price)) * qty,
-            photo_id=product.photo_id, # Сохраняем фото
+            photo_id=product.photo_id,
         ))
         product.order_count += qty
 
@@ -169,7 +167,7 @@ async def create_order_from_cart(
     return order
 
 # ═══════════════════════════════════════════
-#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ И ОТПРАВКА МАГАЗИНУ
+#   ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (С ФОТО И НАКЛАДНОЙ)
 # ═══════════════════════════════════════════
 async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
@@ -227,15 +225,13 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
             f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
             f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
             f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
-            f"🕒 <b>ВРЕМЯ:</b> {order.delivery_slot or '—'}\n"
+            f"🕒 <b>ВРЕМЯ ДОСТАВКИ:</b> {order.delivery_slot or '—'}\n"
         )
         
         if order.comment:
             text += f"💬 <b>КОММЕНТАРИЙ:</b> {order.comment}\n"
         
         text += f"📸 <b>ФОТО ВРУЧЕНИЯ:</b> {'Да' if order.need_delivery_photo else 'Нет'}\n"
-        
-        # ОСТАВИЛИ ТОЛЬКО СТОИМОСТЬ БУКЕТОВ
         text += (
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>ФИНАНСЫ:</b>\n"
@@ -263,7 +259,7 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
             )
     return order
     # ═══════════════════════════════════════════
-#   ВЗЯТИЕ ЗАКАЗА (С ОБНОВЛЕНИЕМ СООБЩЕНИЯ МАГАЗИНУ)
+#   ВЗЯТИЕ ЗАКАЗА (С ОБНОВЛЕНИЕМ МАГАЗИНА И КЛИЕНТА)
 # ═══════════════════════════════════════════
 async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> bool:
     c_result = await session.execute(select(Courier).where(Courier.id == courier_id))
@@ -308,7 +304,7 @@ async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> b
                 f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
                 f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
                 f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
-                f"🕒 <b>ВРЕМЯ:</b> {order.delivery_slot or '—'}\n"
+                f"🕒 <b>ВРЕМЯ ДОСТАВКИ:</b> {order.delivery_slot or '—'}\n"
             )
             
             if order.comment:
@@ -339,6 +335,9 @@ async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> b
             except TelegramBadRequest as e:
                 print(f"Не удалось обновить сообщение магазину: {e}")
     
+    # ── ОБНОВЛЯЕМ СООБЩЕНИЕ КЛИЕНТУ ──
+    await update_client_order_message(session, order_id)
+    
     return True
 
 # ═══════════════════════════════════════════
@@ -349,9 +348,11 @@ async def update_order_status(session: AsyncSession, order_id: int, new_status: 
         update(Order).where(Order.id == order_id).values(status=new_status)
     )
     await session.commit()
+    # После смены статуса обновляем сообщение клиента
+    await update_client_order_message(session, order_id)
 
 # ═══════════════════════════════════════════
-#   ЗАВЕРШЕНИЕ ЗАКАЗА (С БУСТОМ)
+#   ЗАВЕРШЕНИЕ ЗАКАЗА
 # ═══════════════════════════════════════════
 async def complete_order(session: AsyncSession, order_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
@@ -361,7 +362,6 @@ async def complete_order(session: AsyncSession, order_id: int):
     order.status = "done"
     order.delivered_at = datetime.now()
 
-    # Курьеру (с учетом буста за срочность)
     courier_fee = Decimal(str(order.courier_fee or 0))
     courier_fee += Decimal(str(order.boost_amount or 0))
 
@@ -369,17 +369,14 @@ async def complete_order(session: AsyncSession, order_id: int):
     order_items = items_result.scalars().all()
     shop_sum = sum(Decimal(str(oi.shop_price)) * oi.quantity for oi in order_items)
 
-    # Начисляем магазину
     await session.execute(update(Shop).where(Shop.id == order.shop_id).values(balance=Shop.balance + shop_sum))
 
-    # Начисляем курьеру
     if order.courier_id:
         await session.execute(
             update(Courier).where(Courier.id == order.courier_id)
             .values(balance=Courier.balance + courier_fee, total_orders=Courier.total_orders + 1)
         )
         
-        # Обновляем статистику за день (для бонусов)
         today_stat = await session.execute(
             select(CourierDailyStat).where(CourierDailyStat.courier_id == order.courier_id, CourierDailyStat.date == date.today())
         )
@@ -390,17 +387,20 @@ async def complete_order(session: AsyncSession, order_id: int):
         else:
             session.add(CourierDailyStat(courier_id=order.courier_id, date=date.today(), completed_orders=1, earned=courier_fee))
 
-    # Пишем транзакции
     session.add(Transaction(user_type="shop", user_id=order.shop_id, amount=shop_sum, type="order_payment", order_id=order_id))
     if order.courier_id:
         session.add(Transaction(user_type="courier", user_id=order.courier_id, amount=courier_fee, type="order_payment", order_id=order_id))
     session.add(Transaction(user_type="platform", user_id=0, amount=order.platform_income, type="order_income", order_id=order_id))
 
     await session.commit()
+    
+    # Обновляем сообщение клиента
+    await update_client_order_message(session, order_id)
+    
     return order
 
 # ═══════════════════════════════════════════
-#   ОТМЕНА ЗАКАЗА (С ВОЗВРАТОМ)
+#   ОТМЕНА ЗАКАЗА
 # ═══════════════════════════════════════════
 async def cancel_order(
     session: AsyncSession,
@@ -413,7 +413,6 @@ async def cancel_order(
     order = result.scalar_one_or_none()
     if not order: return None
 
-    # Запрет отмены, если курьер уже забрал
     if order.status in ("picked", "delivering", "at_client", "done"):
         return None
 
@@ -432,7 +431,6 @@ async def cancel_order(
         ))
         order.payment_status = "refunded"
 
-    # Если отменил магазин — повышаем счетчик отказов
     if cancelled_by == "shop":
         await session.execute(
             update(Shop).where(Shop.id == order.shop_id)
@@ -440,7 +438,91 @@ async def cancel_order(
         )
 
     await session.commit()
+    
+    # Обновляем сообщение клиента
+    await update_client_order_message(session, order_id)
+    
     return order
+
+# ═══════════════════════════════════════════
+#   АВТООБНОВЛЕНИЕ СООБЩЕНИЯ КЛИЕНТА (НАКЛАДНАЯ)
+# ═══════════════════════════════════════════
+async def update_client_order_message(session: AsyncSession, order_id: int):
+    result = await session.execute(select(Order).where(Order.id == order_id))
+    order = result.scalar_one_or_none()
+    if not order or not order.client_message_id: return
+
+    c_result = await session.execute(select(Client).where(Client.id == order.client_id))
+    client = c_result.scalar_one_or_none()
+    if not client or not client.tg_id: return
+
+    items_r = await session.execute(select(OrderItem).where(OrderItem.order_id == order_id))
+    items = items_r.scalars().all()
+
+    courier = None
+    if order.courier_id:
+        cr = await session.execute(select(Courier).where(Courier.id == order.courier_id))
+        courier = cr.scalar_one_or_none()
+
+    status_map = {
+        "pending": "⏳ Ожидает оплаты", "new": "🆕 Оплачен, ждет магазина",
+        "wait": "🔍 Ищем курьера", "going": "🚴 Курьер едет в магазин",
+        "picked": "📦 Курьер забрал букет", "delivering": "🚴 Курьер везёт вам",
+        "at_client": "📍 Курьер у вас", "done": "✅ Доставлено", "cancel": "❌ Отменено",
+    }
+    status_text = status_map.get(order.status, order.status)
+
+    text = (
+        f"📦 <b>Заказ #{order.id}</b>\n"
+        f"💳 Статус: <b>{status_text}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🌷 <b>СОСТАВ ЗАКАЗА:</b>\n"
+    )
+    for it in items:
+        text += f"  • {it.title} × {it.quantity} = {helpers.money(it.total)}\n"
+    
+    text += (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📍 <b>КУДА ДОСТАВИТЬ:</b>\n"
+        f"  {order.address}\n"
+        f"👤 <b>ПОЛУЧАТЕЛЬ:</b> {order.client_name}\n"
+        f"📞 <b>ТЕЛЕФОН:</b> {order.client_phone}\n"
+        f"📅 <b>ДАТА:</b> {helpers.format_date(order.delivery_date)}\n"
+        f"🕒 <b>ВРЕМЯ ДОСТАВКИ:</b> {order.delivery_slot or '—'}\n"
+    )
+    
+    if courier and order.status in ("going", "picked", "delivering", "at_client"):
+        text += (
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🚴 <b>ВАШ КУРЬЕР:</b>\n"
+            f"  👤 {courier.name}\n"
+            f"  📞 {courier.phone}\n"
+        )
+    
+    text += (
+        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>СУММА:</b> {helpers.money(order.total_price)}\n"
+    )
+    
+    from keyboards import track_order
+    from bots import bot_client
+    from aiogram.exceptions import TelegramBadRequest
+    
+    markup = track_order(
+        order.id, order.status, courier.phone if courier else None,
+        float(courier.lat) if courier and courier.lat else None,
+        float(courier.lon) if courier and courier.lon else None,
+    )
+
+    try:
+        await bot_client.edit_message_text(
+            chat_id=client.tg_id,
+            message_id=order.client_message_id,
+            text=text,
+            reply_markup=markup
+        )
+    except TelegramBadRequest as e:
+        print(f"Не удалось обновить сообщение клиенту: {e}")
 
 # ═══════════════════════════════════════════
 #   РЕДАКТИРОВАНИЕ И ПОИСК
@@ -546,4 +628,3 @@ async def repeat_order(session: AsyncSession, order_id: int, client_id: int) -> 
 
     await session.commit()
     return {"ok": added > 0, "added": added, "skipped": skipped}
-    
