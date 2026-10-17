@@ -439,3 +439,100 @@ async def add_cat(call: CallbackQuery, state: FSMContext):
 
 # ... ОСТАЛЬНЫЕ ФУНКЦИИ (СВОЯ ДОСТАВКА, СТАТИСТИКА, НАСТРОЙКИ И Т.Д.) ОСТАЮТСЯ БЕЗ ИЗМЕНЕНИЙ ...
 # (Вставь остаток кода из предыдущего сообщения, начиная с раздела НОВЫЕ ЗАКАЗЫ)
+# ═══════════════════════════════════════════
+#   УПРАВЛЕНИЕ ТОВАРОМ (РАБОЧИЕ КНОПКИ)
+# ═══════════════════════════════════════════
+@router.callback_query(F.data.startswith("shop_toggle_"))
+async def prod_toggle(call: CallbackQuery):
+    product_id = int(call.data.split("_")[2])
+    async with async_session() as session:
+        r = await session.execute(select(Product).where(Product.id == product_id))
+        p = r.scalar_one_or_none()
+        if p:
+            p.is_active = not p.is_active
+            await session.commit()
+    await call.answer("Обновлено")
+    await prod_view(call)
+
+@router.callback_query(F.data.startswith("shop_publish_"))
+async def prod_publish(call: CallbackQuery):
+    product_id = int(call.data.split("_")[2])
+    async with async_session() as session:
+        r = await session.execute(select(Product).where(Product.id == product_id))
+        p = r.scalar_one_or_none()
+        if p:
+            p.is_draft = False
+            p.is_active = True
+            await session.commit()
+    await call.answer("📤 Опубликовано", show_alert=True)
+    await prod_view(call)
+
+@router.callback_query(F.data.startswith("shop_delete_"))
+async def prod_delete(call: CallbackQuery):
+    product_id = int(call.data.split("_")[2])
+    async with async_session() as session:
+        await session.execute(delete(Product).where(Product.id == product_id))
+        await session.commit()
+    await call.answer("🗑 Удалено", show_alert=True)
+    await my_products(call)
+
+# ── ИЗМЕНЕНИЕ ЦЕНЫ ──
+@router.callback_query(F.data.startswith("shop_edit_price_"))
+async def edit_price_start(call: CallbackQuery, state: FSMContext):
+    product_id = int(call.data.split("_")[3])
+    await state.update_data(edit_product_id=product_id)
+    await state.set_state(ShopEdit.price)
+    await call.message.edit_text("💰 Введите новую цену (₽):", reply_markup=kb.cancel_kb("shop_my_products"))
+    await call.answer()
+
+@router.message(ShopEdit.price)
+async def edit_price_save(message: Message, state: FSMContext):
+    try:
+        new_price = float(message.text.replace(",", ".").strip())
+        if new_price <= 0: raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите число больше 0.")
+        return
+
+    data = await state.get_data()
+    product_id = data.get("edit_product_id")
+
+    markup = config.get_markup(new_price)
+    client_price = new_price + markup
+
+    async with async_session() as session:
+        r = await session.execute(select(Product).where(Product.id == product_id))
+        p = r.scalar_one_or_none()
+        if p:
+            p.shop_price = Decimal(str(new_price))
+            p.markup = Decimal(str(markup))
+            p.client_price = Decimal(str(client_price))
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Цена обновлена.", reply_markup=kb.shop_products_menu())
+
+# ── ИЗМЕНЕНИЕ ФОТО ──
+@router.callback_query(F.data.startswith("shop_edit_photo_"))
+async def edit_photo_start(call: CallbackQuery, state: FSMContext):
+    product_id = int(call.data.split("_")[3])
+    await state.update_data(edit_product_id=product_id)
+    await state.set_state(ShopEdit.photo)
+    await call.message.edit_text("📸 Отправьте новое фото товара:", reply_markup=kb.cancel_kb("shop_my_products"))
+    await call.answer()
+
+@router.message(ShopEdit.photo, F.photo)
+async def edit_photo_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    product_id = data.get("edit_product_id")
+    photo_id = message.photo[-1].file_id
+
+    async with async_session() as session:
+        r = await session.execute(select(Product).where(Product.id == product_id))
+        p = r.scalar_one_or_none()
+        if p:
+            p.photo_id = photo_id
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Фото обновлено.", reply_markup=kb.shop_products_menu())
