@@ -40,26 +40,27 @@ class ClientFSM(StatesGroup):
     address_manage    = State()
     address_add       = State()
     address_add_title = State()
-
-    # Редактирование заказа
     edit_order_field  = State()
-
-    # Жалоба
     complaint_reason  = State()
 
 
 # ═══════════════════════════════════════════
-#   МАГАЗИН — РЕГИСТРАЦИЯ
+#   МАГАЗИН — РЕГИСТРАЦИЯ (ИСПРАВЛЕНО)
 # ═══════════════════════════════════════════
 class ShopReg(StatesGroup):
-    name         = State()
-    address      = State()
-    phone        = State()
-    telegram     = State()
-    vk           = State()
-    owner_name   = State()
-    geo          = State()
-    categories   = State()
+    name              = State()
+    city              = State()  # Добавлено
+    street            = State()  # Добавлено
+    house             = State()  # Добавлено
+    phone             = State()
+    telegram          = State()
+    vk                = State()
+    owner_name        = State()
+    geo               = State()
+    schedule_weekdays = State()  # Добавлено
+    schedule_sat      = State()  # Добавлено
+    schedule_sun      = State()  # Добавлено
+    categories        = State()
 
 
 # ═══════════════════════════════════════════
@@ -86,20 +87,12 @@ class ShopEdit(StatesGroup):
     close_time   = State()
     support_msg  = State()
     chat_message = State()
-
-    # График работы
     schedule_day = State()
-
-    # Реквизиты
     req_card     = State()
     req_bank     = State()
     req_holder   = State()
     req_sbp      = State()
-
-    # Массовое изменение цен
     mass_price   = State()
-
-    # Редактирование заказа
     edit_order_field = State()
 
 
@@ -119,8 +112,6 @@ class ShopDelivery(StatesGroup):
     need_photo      = State()
     confirm         = State()
     payment         = State()
-
-    # Редактирование
     edit_field      = State()
 
 
@@ -147,8 +138,6 @@ class CourierFSM(StatesGroup):
     delivery_photo   = State()
     chat_message     = State()
     support_msg      = State()
-
-    # Реквизиты
     req_card         = State()
     req_bank         = State()
     req_holder       = State()
@@ -159,52 +148,29 @@ class CourierFSM(StatesGroup):
 #   АДМИН
 # ═══════════════════════════════════════════
 class AdminFSM(StatesGroup):
-    # Настройки
     set_commission    = State()
     set_min_withdraw  = State()
     set_bonus         = State()
     set_hours         = State()
-
-    # Рассылка
     broadcast_text    = State()
     broadcast_confirm = State()
-
-    # Промокоды
     promo_code        = State()
     promo_type        = State()
     promo_value       = State()
     promo_uses        = State()
-
-    # Возвраты
     refund_amount     = State()
-
-    # Boost
     boost_custom      = State()
-
-    # Ответ клиенту / магазину / курьеру
     reply_to_client   = State()
-
-    # Блокировка / разблокировка по ID
     block_by_id       = State()
     unblock_by_id     = State()
-
-    # Пополнение баланса
     topup_shop_id     = State()
     topup_amount      = State()
-
-    # Редактирование магазина
     ase_shop_id       = State()
     ase_field         = State()
-
-    # Редактирование курьера
     ace_courier_id    = State()
     ace_field         = State()
-
-    # Мультиадмин
     add_admin_id      = State()
     add_admin_name    = State()
     edit_permissions  = State()
-
-    # Обновление бота
     update_version    = State()
     update_changes    = State()
