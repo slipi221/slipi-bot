@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — бот магазина
+Flowers Express — бот магазина
 """
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -38,6 +38,7 @@ async def show_shop_menu(message: Message, shop: Shop, edit: bool = False):
         f"🕒 {shop.work_start} – {shop.work_end}\n"
         f"{'🟢 На смене' if shop.is_on_shift else '🔴 Не на смене'}"
     )
+    # В меню передаем статус смены
     markup = kb.shop_main(shop.is_on_shift)
     if edit:
         try: await message.edit_text(text, reply_markup=markup)
@@ -45,6 +46,9 @@ async def show_shop_menu(message: Message, shop: Shop, edit: bool = False):
     else:
         await message.answer(text, reply_markup=markup)
 
+# ═══════════════════════════════════════════
+#   /start
+# ═══════════════════════════════════════════
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -52,7 +56,7 @@ async def cmd_start(message: Message, state: FSMContext):
         shop = await get_shop(session, message.from_user.id)
 
     if not shop:
-        await message.answer("🏪 <b>Стать партнёром SLIPI</b>\n\nОтправьте команду /register чтобы зарегистрироваться.")
+        await message.answer("🏪 <b>Стать партнёром Flowers Express</b>\n\nОтправьте команду /register чтобы зарегистрироваться.")
         return
     if shop.status == "pending":
         await message.answer("⏳ Ваша заявка на рассмотрении.")
@@ -81,9 +85,12 @@ async def back_main(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "shop_support")
 async def shop_support_handler(call: CallbackQuery):
-    await call.message.edit_text(f"🆘 <b>Поддержка SLIPI</b>\n\nНапишите: {config.SUPPORT_TG}\n📞 {config.SUPPORT_PHONE}", reply_markup=kb.shop_back())
+    await call.message.edit_text(f"🆘 <b>Поддержка</b>\n\nНапишите: {config.SUPPORT_TG}\n📞 {config.SUPPORT_PHONE}", reply_markup=kb.shop_back())
     await call.answer()
 
+# ═══════════════════════════════════════════
+#   РЕГИСТРАЦИЯ (ПОШАГОВАЯ)
+# ═══════════════════════════════════════════
 @router.message(Command("register"))
 async def shop_register(message: Message, state: FSMContext):
     async with async_session() as session:
@@ -263,6 +270,9 @@ async def reg_schedule_sun(message: Message, state: FSMContext):
         )
     except Exception: pass
 
+# ═══════════════════════════════════════════
+#   СМЕНА (С ОТПРАВКОЙ OUTBOX)
+# ═══════════════════════════════════════════
 @router.callback_query(F.data == "shop_on_shift")
 async def on_shift(call: CallbackQuery):
     async with async_session() as session:
@@ -270,7 +280,9 @@ async def on_shift(call: CallbackQuery):
         if not shop: return
         shop.is_on_shift = True
         await session.commit()
+        # Отправляем накопленные ночные заказы
         await notify.flush_outbox_for_shop(session, shop.id)
+
     await call.answer("🟢 Вы на смене! Накопленные заказы отправлены.")
     await show_shop_menu(call.message, shop, edit=True)
 
@@ -305,6 +317,7 @@ async def my_products(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("shop_prod_view_"))
 async def prod_view(call: CallbackQuery):
+    # ИСПРАВЛЕНО: берем ID через [-1], чтобы не было IndexError
     product_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Product).where(Product.id == product_id))
@@ -348,11 +361,22 @@ async def prod_publish(call: CallbackQuery):
 async def prod_delete(call: CallbackQuery):
     product_id = int(call.data.split("_")[-1])
     async with async_session() as session:
-        await session.execute(delete(Product).where(Product.id == product_id))
-        await session.commit()
-    await call.answer("🗑 Удалено", show_alert=True)
+        try:
+            await session.execute(delete(Product).where(Product.id == product_id))
+            await session.commit()
+            await call.answer("🗑 Удалено", show_alert=True)
+        except Exception:
+            # Если товар есть в истории заказов (RESTRICT), просто скрываем
+            r = await session.execute(select(Product).where(Product.id == product_id))
+            p = r.scalar_one_or_none()
+            if p:
+                p.is_active = False
+                p.is_draft = True
+                await session.commit()
+            await call.answer("⚠️ Товар скрыт (есть в истории заказов)", show_alert=True)
     await my_products(call)
 
+# ── ИЗМЕНЕНИЕ ЦЕНЫ ──
 @router.callback_query(F.data.startswith("shop_edit_price_"))
 async def edit_price_start(call: CallbackQuery, state: FSMContext):
     product_id = int(call.data.split("_")[-1])
@@ -372,6 +396,8 @@ async def edit_price_save(message: Message, state: FSMContext):
 
     data = await state.get_data()
     product_id = data.get("edit_product_id")
+    
+    # Пересчитываем наценку и цену клиента
     markup = config.get_markup(new_price)
     client_price = new_price + markup
 
@@ -387,6 +413,7 @@ async def edit_price_save(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("✅ Цена обновлена.", reply_markup=kb.shop_products_menu())
 
+# ── ИЗМЕНЕНИЕ ФОТО ──
 @router.callback_query(F.data.startswith("shop_edit_photo_"))
 async def edit_photo_start(call: CallbackQuery, state: FSMContext):
     product_id = int(call.data.split("_")[-1])
@@ -574,7 +601,9 @@ async def new_orders(call: CallbackQuery):
     async with async_session() as session:
         shop = await get_shop(session, call.from_user.id)
         if not shop: return
-        result = await session.execute(select(Order).where(Order.shop_id == shop.id, Order.status == "new", Order.payment_status == "confirmed").order_by(Order.id.asc()))
+        result = await session.execute(
+            select(Order).where(Order.shop_id == shop.id, Order.status == "new", Order.payment_status == "confirmed").order_by(Order.id.asc())
+        )
         orders = result.scalars().all()
 
     if not orders:
@@ -617,7 +646,7 @@ async def shop_accept(call: CallbackQuery):
     await call.answer("Заказ принят")
 
     if client and client.tg_id:
-        try: await bot_client.send_message(client.tg_id, f"🟢 <b>Магазин принял заказ #{order_id}!</b>")
+        try: await bot_client.send_message(client.tg_id, f"🟢 <b>Магазин принял заказ #{order_id}!</b>\n\nИщем курьера 🚴")
         except Exception: pass
 
 @router.callback_query(F.data.startswith("shop_reject_") & ~F.data.startswith("shop_reject_reason_"))
@@ -699,9 +728,10 @@ async def del_phone(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("shop_del_date_"), ShopDelivery.date)
 async def del_date(call: CallbackQuery, state: FSMContext):
     part = call.data.replace("shop_del_date_", "")
-    if part == "today": d = date.today()
-    elif part == "tomorrow": d = date.today() + timedelta(days=1)
-    else: d = date.today() + timedelta(days=2)
+    today = helpers.today_moscow()
+    if part == "today": d = today
+    elif part == "tomorrow": d = today + timedelta(days=1)
+    else: d = today + timedelta(days=2)
     await state.update_data(delivery_date=str(d))
     await state.set_state(ShopDelivery.time_period)
     await call.message.edit_text("📝 <b>Шаг 5/9:</b> Период:", reply_markup=kb.shop_delivery_period())
@@ -723,7 +753,8 @@ async def del_back_period(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("shop_del_slot_"), ShopDelivery.time_slot)
 async def del_slot(call: CallbackQuery, state: FSMContext):
-    slot = call.data.split("_")[-1]
+    parts = call.data.split("_")
+    slot = parts[-1]
     await state.update_data(delivery_slot=slot)
     await state.set_state(ShopDelivery.photo)
     await call.message.edit_text("📸 <b>Шаг 6/9:</b> Фото букета\n\nОтправьте или пропустите.", reply_markup=kb.shop_delivery_photo())
@@ -901,7 +932,7 @@ async def stats(call: CallbackQuery):
 @router.callback_query(F.data.startswith("shop_stats_") & ~F.data.startswith("shop_stats_sla"))
 async def stats_period(call: CallbackQuery):
     period = call.data.replace("shop_stats_", "")
-    now = datetime.now()
+    now = helpers.now_moscow()
     if period == "today": since, label = now.replace(hour=0, minute=0, second=0, microsecond=0), "Сегодня"
     elif period == "week": since, label = now - timedelta(days=7), "За неделю"
     elif period == "month": since, label = now - timedelta(days=30), "За месяц"
