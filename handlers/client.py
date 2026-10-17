@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from aiogram import Router, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
 
@@ -261,16 +261,17 @@ async def product_card(call: CallbackQuery):
     sent = False
     if product.photo_id:
         try:
-            await call.message.answer_photo(photo=product.photo_id, caption=text, reply_markup=markup)
+            # 1. Скачиваем файл через бота магазина
+            file = await bot_shop.get_file(product.photo_id)
+            file_bytes = await bot_shop.download_file(file.file_path)
+            
+            # 2. Отправляем как новый файл через клиентского бота
+            photo_input = BufferedInputFile(file_bytes.read(), filename="product.jpg")
+            await call.message.answer_photo(photo=photo_input, caption=text, reply_markup=markup)
             sent = True
-        except TelegramBadRequest:
-            try:
-                file = await bot_shop.get_file(product.photo_id)
-                photo_url = f"https://api.telegram.org/file/bot{config.SHOP_TOKEN}/{file.file_path}"
-                await call.message.answer_photo(photo=photo_url, caption=text, reply_markup=markup)
-                sent = True
-            except Exception:
-                pass
+        except Exception as e:
+            print(f"Ошибка скачивания/отправки фото: {e}")
+            pass
 
     if not sent:
         await call.message.answer(text, reply_markup=markup)
@@ -296,8 +297,7 @@ async def fav_toggle(call: CallbackQuery):
             session.add(Favorite(client_id=client.id, product_id=product_id))
             await session.commit()
             await call.answer("❤️ Добавлено")
-
-# ═══════════════════════════════════════════
+            # ═══════════════════════════════════════════
 #   КОРЗИНА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_cart")
@@ -686,7 +686,8 @@ async def order_paid(call: CallbackQuery, state: FSMContext):
         )
     except Exception: pass
     await call.answer()
-    # ═══════════════════════════════════════════
+
+# ═══════════════════════════════════════════
 #   МОИ ЗАКАЗЫ И ТРЕКИНГ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_orders")
@@ -843,7 +844,7 @@ async def order_edit_field_save(message: Message, state: FSMContext):
     await message.answer("✅ Изменено!", reply_markup=kb.client_main())
 
 # ═══════════════════════════════════════════
-#   ОТЗЫВЫ
+#   ОТЗЫВЫ И ИЗБРАННОЕ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("rate_start_"))
 async def rate_start(call: CallbackQuery):
@@ -922,9 +923,6 @@ async def rate_skip(call: CallbackQuery):
         await call.message.edit_text("✅ Спасибо за заказ! 🌸", reply_markup=kb.client_main())
     await call.answer()
 
-# ═══════════════════════════════════════════
-#   ИЗБРАННОЕ
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_favorites")
 async def favorites(call: CallbackQuery):
     async with async_session() as session:
@@ -942,7 +940,7 @@ async def favorites(call: CallbackQuery):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   БАЛАНС
+#   БАЛАНС, ПРОМОКОД, СОБЫТИЯ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_balance")
 async def balance(call: CallbackQuery):
@@ -980,87 +978,6 @@ async def balance_history(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb.client_back("client_balance"))
     await call.answer()
 
-@router.callback_query(F.data == "balance_withdraw")
-async def balance_withdraw(call: CallbackQuery):
-    async with async_session() as session:
-        client = await get_or_create_client(session, call.from_user.id)
-        if float(client.balance) < config.CLIENT_MIN_WITHDRAW:
-            await call.answer(f"Минимум {config.CLIENT_MIN_WITHDRAW} ₽", show_alert=True)
-            return
-
-    await call.message.edit_text(
-        f"💸 <b>Вывод на карту</b>\n\n💰 Баланс: {helpers.money(client.balance)}\n"
-        f"💳 Комиссия: {config.CLIENT_WITHDRAW_COMMISSION}%\n💵 Минимум: {config.CLIENT_MIN_WITHDRAW} ₽\n\n"
-        f"Выберите способ:",
-        reply_markup=kb.withdraw_method()
-    )
-    await call.answer()
-
-@router.callback_query(F.data == "wd_card")
-async def wd_card(call: CallbackQuery, state: FSMContext):
-    await state.set_state(ClientFSM.withdraw_amount)
-    await call.message.edit_text("💳 <b>Вывод на карту</b>\n\nВведите сумму:", reply_markup=kb.cancel_kb("client_balance"))
-    await call.answer()
-
-@router.callback_query(F.data == "wd_sbp")
-async def wd_sbp(call: CallbackQuery, state: FSMContext):
-    await state.set_state(ClientFSM.withdraw_amount)
-    await call.message.edit_text("📱 <b>Вывод по СБП</b>\n\nВведите сумму:", reply_markup=kb.cancel_kb("client_balance"))
-    await call.answer()
-
-@router.message(ClientFSM.withdraw_amount)
-async def process_withdraw(message: Message, state: FSMContext):
-    try: amount = Decimal(message.text.replace(",", ".").strip())
-    except Exception:
-        await message.answer("❌ Введите число.")
-        return
-
-    async with async_session() as session:
-        client = await get_or_create_client(session, message.from_user.id)
-        if amount < config.CLIENT_MIN_WITHDRAW:
-            await message.answer(f"❌ Минимум {config.CLIENT_MIN_WITHDRAW} ₽")
-            return
-        if amount > client.balance:
-            await message.answer(f"❌ Больше баланса.")
-            return
-
-    await state.update_data(withdraw_amount=float(amount))
-    await state.set_state(ClientFSM.withdraw_card)
-    await message.answer("💳 Введите номер карты (16 цифр):", reply_markup=kb.cancel_kb("client_balance"))
-
-@router.message(ClientFSM.withdraw_card)
-async def process_withdraw_card(message: Message, state: FSMContext):
-    if not helpers.is_valid_card(message.text):
-        await message.answer("❌ Неверный номер карты.")
-        return
-
-    data = await state.get_data()
-    amount = Decimal(str(data["withdraw_amount"]))
-    card = helpers.clean_phone(message.text)
-
-    async with async_session() as session:
-        client = await get_or_create_client(session, message.from_user.id)
-        payout = await payments_service.create_payout(
-            session=session, user_type="client", user_id=client.id,
-            amount=amount, method="card", card_number=card,
-        )
-        
-        if not payout:
-            await message.answer("❌ Ошибка. Недостаточно средств.")
-            await state.clear()
-            return
-
-    await state.clear()
-    commission = amount * Decimal(str(config.CLIENT_WITHDRAW_COMMISSION)) / 100
-    await message.answer(
-        f"✅ Заявка на вывод создана.\n\n💰 Сумма: {helpers.money(amount)}\n"
-        f"📉 Комиссия: -{helpers.money(commission)}\n💵 К получению: {helpers.money(amount - commission)}",
-        reply_markup=kb.client_main()
-    )
-
-# ═══════════════════════════════════════════
-#   ПРОМОКОД
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_promo")
 async def promo_menu(call: CallbackQuery, state: FSMContext):
     await state.set_state(ClientFSM.promo_input)
@@ -1098,9 +1015,6 @@ async def promo_apply(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(f"✅ <b>Промокод активирован!</b>\n\n🎁 {code} — {d}", reply_markup=kb.client_main())
 
-# ═══════════════════════════════════════════
-#   СОБЫТИЯ
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_events")
 async def events(call: CallbackQuery):
     async with async_session() as session:
