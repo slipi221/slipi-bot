@@ -77,20 +77,29 @@ class Shop(Base):
     vk_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    
+    # ИСПРАВЛЕНО (Баг #1): Разделенный адрес
+    city: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    street: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    house: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True) # Полный адрес для вывода
+
     phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     telegram: Mapped[str | None] = mapped_column(String(100), nullable=True)
     vk_link: Mapped[str | None] = mapped_column(String(100), nullable=True)
     owner_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lat: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
     lon: Mapped[float | None] = mapped_column(Numeric(10, 7), nullable=True)
+    
     status: Mapped[str] = mapped_column(String(20), default="pending")
     balance: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
     rating: Mapped[float] = mapped_column(Numeric(3, 2), default=0)
     reviews_count: Mapped[int] = mapped_column(Integer, default=0)
     total_orders: Mapped[int] = mapped_column(Integer, default=0)
     rejected_count: Mapped[int] = mapped_column(Integer, default=0)
+    
     is_paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_on_shift: Mapped[bool] = mapped_column(Boolean, default=False) # ДОБАВЛЕНО (Баг #3)
 
     work_start: Mapped[str] = mapped_column(String(5), default="08:00")
     work_end: Mapped[str] = mapped_column(String(5), default="22:00")
@@ -252,6 +261,9 @@ class Order(Base):
 
     courier_fee: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
     boost_amount: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=0)
+    
+    # ДОБАВЛЕНО для функции "Контроль доставки" (защита от спама)
+    is_urgent_notified: Mapped[bool] = mapped_column(Boolean, default=False) 
 
     need_delivery_photo: Mapped[bool] = mapped_column(Boolean, default=True)
     delivery_photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -283,6 +295,7 @@ class OrderItem(Base):
     client_price: Mapped[Decimal] = mapped_column(Numeric(10, 2))
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True) # ДОБАВЛЕНО (Баг #12)
 
 
 # ═══════════════════════════════════════════
@@ -333,7 +346,7 @@ class DeliveryOrder(Base):
 
 
 # ═══════════════════════════════════════════
-#   ЧАТ
+#   ЧАТ И УВЕДОМЛЕНИЯ
 # ═══════════════════════════════════════════
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
@@ -345,6 +358,19 @@ class ChatMessage(Base):
     text: Mapped[str] = mapped_column(Text)
     is_read: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+class Outbox(Base):
+    """Очередь отложенных уведомлений (для ночных заказов)"""
+    __tablename__ = "outbox"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    recipient_type: Mapped[str] = mapped_column(String(20)) # client, shop, courier, admin
+    recipient_id: Mapped[int] = mapped_column(Integer) 
+    message_text: Mapped[str] = mapped_column(Text)
+    reply_markup: Mapped[str | None] = mapped_column(Text, nullable=True) # JSON
+    status: Mapped[str] = mapped_column(String(20), default="pending") # pending, sent
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 # ═══════════════════════════════════════════
@@ -475,7 +501,7 @@ class PromoUse(Base):
 
 
 # ═══════════════════════════════════════════
-#   ДОСТИЖЕНИЯ
+#   ДОСТИЖЕНИЯ И АДМИНЫ
 # ═══════════════════════════════════════════
 class Achievement(Base):
     __tablename__ = "achievements"
@@ -497,9 +523,6 @@ class CourierAchievement(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-# ═══════════════════════════════════════════
-#   АДМИНЫ (мультиадмин)
-# ═══════════════════════════════════════════
 class Admin(Base):
     __tablename__ = "admins"
 
@@ -513,7 +536,7 @@ class Admin(Base):
 
 
 # ═══════════════════════════════════════════
-#   ЛОГИ
+#   ЛОГИ И ОБНОВЛЕНИЯ
 # ═══════════════════════════════════════════
 class Log(Base):
     __tablename__ = "logs"
@@ -537,9 +560,6 @@ class ChangeLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-# ═══════════════════════════════════════════
-#   ОБНОВЛЕНИЯ БОТА
-# ═══════════════════════════════════════════
 class BotUpdate(Base):
     __tablename__ = "bot_updates"
 
