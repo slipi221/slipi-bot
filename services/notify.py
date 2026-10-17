@@ -4,7 +4,7 @@ Flowers Express — единая система уведомлений (Outbox)
 """
 import json
 from datetime import datetime
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
@@ -23,7 +23,12 @@ async def _get_tg_id(session: AsyncSession, r_type: str, r_id: int) -> int | Non
     elif r_type == "courier":
         res = await session.execute(select(Courier.tg_id).where(Courier.id == r_id))
     elif r_type == "admin":
-        # Для админа используем ID из конфига
+        # Для админа: если есть канал — шлем туда, иначе в личку
+        if config.ADMIN_CHANNEL_ID:
+            try:
+                return int(config.ADMIN_CHANNEL_ID)
+            except ValueError:
+                pass
         return config.ADMIN_ID
     else:
         return None
@@ -48,7 +53,6 @@ async def send_notification(
     Отправляет уведомление. 
     Если force_outbox=True (или магазин спит), сохраняет в БД.
     """
-    # Сериализуем клавиатуру
     kb_json = reply_markup if isinstance(reply_markup, str) else (json.dumps(reply_markup) if reply_markup else None)
     
     # 1. Сохраняем в Outbox, если принудительно
@@ -94,22 +98,19 @@ async def send_notification(
         # Пользователь заблокировал бота — помечаем в БД
         if recipient_type == "client":
             await session.execute(
-                Client.__table__.update().where(Client.id == recipient_id).values(is_blocked=True)
+                update(Client).where(Client.id == recipient_id).values(is_blocked=True)
             )
         elif recipient_type == "courier":
             await session.execute(
-                Courier.__table__.update().where(Courier.id == recipient_id).values(is_blocked=True)
+                update(Courier).where(Courier.id == recipient_id).values(is_blocked=True)
             )
-        elif recipient_type == "shop":
-            # Магазины не блокируются, но можно записать в лог
-            pass
         await session.commit()
         print(f"🚫 Пользователь {recipient_type} #{recipient_id} заблокировал бота")
         
     except TelegramBadRequest as e:
         print(f"❌ Ошибка Telegram: {e}")
         # Если ошибка связана с фото, пробуем отправить без него
-        if photo_id and "wrong file" in str(e).lower():
+        if photo_id and ("wrong file" in str(e).lower() or "image" in str(e).lower()):
             try:
                 await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb)
             except Exception: pass
@@ -165,6 +166,6 @@ async def flush_outbox_for_shop(session: AsyncSession, shop_id: int):
             msg.sent_at = helpers.now_moscow()
         except Exception as e:
             print(f"Ошибка отправки из Outbox магазину {shop_id}: {e}")
-            msg.status = "failed" # Помечаем как failed, чтобы не висело вечно
+            msg.status = "failed"
     
     await session.commit()
