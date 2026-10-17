@@ -1,29 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — вспомогательные функции
+Flowers Express — вспомогательные функции
 """
 import json
 import html
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from math import radians, sin, cos, sqrt, atan2
 
 import config
 
 # ═══════════════════════════════════════════
-#   БЕЗОПАСНОСТЬ (ЭКРАНИРОВАНИЕ HTML)
+#   ВРЕМЯ (МОСКОВСКОЕ)
 # ═══════════════════════════════════════════
-def escape(text) -> str:
-    """Экранирует HTML-символы (<, >, &), чтобы Telegram не выдавал ошибку."""
-    return html.escape(str(text)) if text else ""
+MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-# ═══════════════════════════════════════════
-#   ВРЕМЯ
-# ═══════════════════════════════════════════
-def now() -> datetime:
-    return datetime.now()
+def now_moscow() -> datetime:
+    """Возвращает текущее время в Москве (независимо от сервера)."""
+    return datetime.now(MOSCOW_TZ)
 
-def today() -> date:
-    return date.today()
+def today_moscow() -> date:
+    """Возвращает сегодняшнюю дату по Москве."""
+    return now_moscow().date()
 
 def format_dt(dt) -> str:
     if not dt: return "—"
@@ -38,11 +36,11 @@ def format_time(dt) -> str:
     return dt.strftime("%H:%M")
 
 def is_night_now() -> bool:
-    h = datetime.now().hour
+    h = now_moscow().hour
     return h >= config.NIGHT_MODE_START or h < config.NIGHT_MODE_END
 
 def date_label(d: date) -> str:
-    diff = (d - date.today()).days
+    diff = (d - today_moscow()).days
     if diff == 0: return "Сегодня"
     if diff == 1: return "Завтра"
     if diff == 2: return "Послезавтра"
@@ -52,13 +50,20 @@ def is_slot_past(slot: str) -> bool:
     try:
         end_str = slot.split("-")[1]
         h, m = map(int, end_str.split(":"))
-        now_dt = datetime.now()
+        now_dt = now_moscow()
         slot_end = now_dt.replace(hour=h, minute=m, second=0, microsecond=0)
         if h == 0 and now_dt.hour > 12:
             slot_end = slot_end.replace(day=now_dt.day + 1)
         return slot_end < now_dt
     except Exception:
         return False
+
+# ═══════════════════════════════════════════
+#   БЕЗОПАСНОСТЬ (ЭКРАНИРОВАНИЕ HTML)
+# ═══════════════════════════════════════════
+def escape(text) -> str:
+    """Экранирует HTML-символы (<, >, &), чтобы Telegram не выдавал ошибку."""
+    return html.escape(str(text)) if text else ""
 
 # ═══════════════════════════════════════════
 #   ДЕНЬГИ
@@ -94,14 +99,13 @@ def distance_km(lat1, lon1, lat2, lon2) -> float:
 def geo_link(lat, lon) -> str:
     return f"https://yandex.ru/maps/?pt={lon},{lat}&z=17&l=map"
 
-def route_link(points: list[tuple[float, float]]) -> str:
+def route_link(points: list) -> str:
     """
     Строит мультимаршрут.
     Принимает список кортежей [(lat1, lon1), (lat2, lon2), ...]
     """
     if not points or len(points) < 2:
         return ""
-    
     # Формат: rtext=lat1,lon1~lat2,lon2~lat3,lon3
     coords = "~".join([f"{lat},{lon}" for lat, lon in points])
     return f"https://yandex.ru/maps/?rtext={coords}&rtt=auto"
