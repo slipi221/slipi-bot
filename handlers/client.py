@@ -25,7 +25,7 @@ from services import orders as orders_service
 from services import geo as geo_service
 from services import payments as payments_service
 from utils import helpers
-from bots import bot_admin
+from bots import bot_admin, bot_shop
 
 router = Router(name="client")
 
@@ -188,7 +188,11 @@ async def shop_products(call: CallbackQuery):
         return
 
     categories = [(key, helpers.category_name(key), cnt) for key, cnt in cats_count.items()]
-    await call.message.edit_text("🗂 <b>Выберите категорию:</b>", reply_markup=kb.shop_categories(shop_id, categories))
+    try:
+        await call.message.edit_text("🗂 <b>Выберите категорию:</b>", reply_markup=kb.shop_categories(shop_id, categories))
+    except TelegramBadRequest:
+        await call.message.delete()
+        await call.message.answer("🗂 <b>Выберите категорию:</b>", reply_markup=kb.shop_categories(shop_id, categories))
     await call.answer()
 
 @router.callback_query(F.data.startswith("cat_"))
@@ -207,7 +211,11 @@ async def show_category(call: CallbackQuery):
         return
 
     items = [{"id": p.id, "title": p.title, "price": helpers.money(p.client_price)} for p in products[:5]]
-    await call.message.edit_text(f"📦 <b>Товары ({len(products)})</b>", reply_markup=kb.products_list(shop_id, category, items, 0))
+    try:
+        await call.message.edit_text(f"📦 <b>Товары ({len(products)})</b>", reply_markup=kb.products_list(shop_id, category, items, 0))
+    except TelegramBadRequest:
+        await call.message.delete()
+        await call.message.answer(f"📦 <b>Товары ({len(products)})</b>", reply_markup=kb.products_list(shop_id, category, items, 0))
     await call.answer()
 
 @router.callback_query(F.data.startswith("prods_"))
@@ -223,9 +231,14 @@ async def prods_page(call: CallbackQuery):
 
     page_items = products[page * 5:(page * 5) + 5]
     items = [{"id": p.id, "title": p.title, "price": helpers.money(p.client_price)} for p in page_items]
-    await call.message.edit_text(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page))
+    try:
+        await call.message.edit_text(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page))
+    except TelegramBadRequest:
+        await call.message.delete()
+        await call.message.answer(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page))
     await call.answer()
 
+# ЖЕЛЕЗОБЕТОННАЯ КАРТОЧКА ТОВАРА С ФОТО
 @router.callback_query(F.data.startswith("product_"))
 async def product_card(call: CallbackQuery):
     try: product_id = int(call.data.split("_")[1])
@@ -234,7 +247,9 @@ async def product_card(call: CallbackQuery):
     async with async_session() as session:
         result = await session.execute(select(Product).where(Product.id == product_id))
         product = result.scalar_one_or_none()
-        if not product: return
+        if not product:
+            await call.answer("Товар не найден", show_alert=True)
+            return
 
         client = await get_or_create_client(session, call.from_user.id)
         fav_result = await session.execute(select(Favorite).where(Favorite.client_id == client.id, Favorite.product_id == product_id))
@@ -243,16 +258,27 @@ async def product_card(call: CallbackQuery):
     text = f"💐 <b>{product.title}</b>\n\n📝 {product.description or '—'}\n\n💰 <b>{helpers.money(product.client_price)}</b>"
     markup = kb.product_card(product_id, in_fav)
 
-    # ИСПРАВЛЕНО (Баг #12): Защита от падения при редактировании сообщения с фото
+    sent = False
+    if product.photo_id:
+        try:
+            await call.message.answer_photo(photo=product.photo_id, caption=text, reply_markup=markup)
+            sent = True
+        except TelegramBadRequest:
+            try:
+                file = await bot_shop.get_file(product.photo_id)
+                photo_url = f"https://api.telegram.org/file/bot{config.SHOP_TOKEN}/{file.file_path}"
+                await call.message.answer_photo(photo=photo_url, caption=text, reply_markup=markup)
+                sent = True
+            except Exception:
+                pass
+
+    if not sent:
+        await call.message.answer(text, reply_markup=markup)
+
     try:
-        await call.message.delete() # Удаляем старое сообщение (текст или фото)
+        await call.message.delete()
     except TelegramBadRequest:
         pass
-
-    if product.photo_id:
-        await call.message.answer_photo(photo=product.photo_id, caption=text, reply_markup=markup)
-    else:
-        await call.message.answer(text, reply_markup=markup)
     await call.answer()
 
 @router.callback_query(F.data.startswith("fav_toggle_"))
@@ -410,7 +436,6 @@ async def order_cancel(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "order_new_addr", OrderFSM.address)
 async def order_new_addr(call: CallbackQuery, state: FSMContext):
-    # ИСПРАВЛЕНО (Баг #9): Кнопка нового адреса теперь просто просит ввести текст
     await call.message.edit_text("📝 Введите адрес текстом:", reply_markup=kb.order_cancel())
     await call.answer()
 
@@ -598,8 +623,6 @@ async def show_order_confirm(message: Message, state: FSMContext, edit: bool = F
     text += f"\n\n📍 {data.get('address')}\n👤 {data.get('client_name')}\n📞 {data.get('client_phone')}"
     text += f"\n📅 {data.get('delivery_date')} | 🕒 {data.get('delivery_slot')}"
     text += f"\n📸 Фото вручения: {'Да' if data.get('need_photo') else 'Нет'}"
-    
-    # ВАЖНО: Показываем итоговую сумму со скидкой (Баг #5)
     text += f"\n\n<b>Итого: {helpers.money(totals['total'])}</b>"
 
     await state.set_state(OrderFSM.confirm)
@@ -608,7 +631,6 @@ async def show_order_confirm(message: Message, state: FSMContext, edit: bool = F
 
 @router.callback_query(F.data == "order_edit", OrderFSM.confirm)
 async def order_edit(call: CallbackQuery, state: FSMContext):
-    # ИСПРАВЛЕНО (Баг #10): Возвращаем в начало оформления
     await state.set_state(OrderFSM.address)
     await call.message.edit_text("📝 <b>Шаг 1 из 8:</b> Введите адрес доставки заново или выберите сохраненный:", reply_markup=kb.order_cancel())
     await call.answer()
@@ -657,7 +679,6 @@ async def order_paid(call: CallbackQuery, state: FSMContext):
     )
 
     try:
-        # Отправляем админу с кнопками (Баг #14)
         await bot_admin.send_message(
             config.ADMIN_ID,
             f"💳 <b>Новый платёж!</b>\n\n📦 Заказ #{order.id}\n💰 Сумма: {helpers.money(order.total_price)}",
@@ -809,7 +830,6 @@ async def order_edit_field_save(message: Message, state: FSMContext):
             await state.clear()
             return
 
-        # Уведомляем курьера, если он назначен
         o_r = await session.execute(select(Order).where(Order.id == order_id))
         order = o_r.scalar_one_or_none()
         if order and order.courier_id:
@@ -847,7 +867,6 @@ async def process_rating(call: CallbackQuery):
             order = o_r.scalar_one_or_none()
             target_id = order.courier_id if order else None
 
-        # Проверка антидубля
         check = await session.execute(select(Review).where(Review.order_id == order_id, Review.from_tg_id == call.from_user.id, Review.target_type == target))
         if check.scalar_one_or_none():
             await call.answer("Вы уже оценили")
