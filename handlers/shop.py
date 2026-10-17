@@ -38,7 +38,6 @@ async def show_shop_menu(message: Message, shop: Shop, edit: bool = False):
         f"🕒 {shop.work_start} – {shop.work_end}\n"
         f"{'🟢 На смене' if shop.is_on_shift else '🔴 Не на смене'}"
     )
-    # В меню передаем статус смены
     markup = kb.shop_main(shop.is_on_shift)
     if edit:
         try: await message.edit_text(text, reply_markup=markup)
@@ -47,7 +46,7 @@ async def show_shop_menu(message: Message, shop: Shop, edit: bool = False):
         await message.answer(text, reply_markup=markup)
 
 # ═══════════════════════════════════════════
-#   /start
+#   /start И РЕГИСТРАЦИЯ
 # ═══════════════════════════════════════════
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -88,9 +87,6 @@ async def shop_support_handler(call: CallbackQuery):
     await call.message.edit_text(f"🆘 <b>Поддержка</b>\n\nНапишите: {config.SUPPORT_TG}\n📞 {config.SUPPORT_PHONE}", reply_markup=kb.shop_back())
     await call.answer()
 
-# ═══════════════════════════════════════════
-#   РЕГИСТРАЦИЯ (ПОШАГОВАЯ)
-# ═══════════════════════════════════════════
 @router.message(Command("register"))
 async def shop_register(message: Message, state: FSMContext):
     async with async_session() as session:
@@ -271,7 +267,7 @@ async def reg_schedule_sun(message: Message, state: FSMContext):
     except Exception: pass
 
 # ═══════════════════════════════════════════
-#   СМЕНА (С ОТПРАВКОЙ OUTBOX)
+#   СМЕНА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "shop_on_shift")
 async def on_shift(call: CallbackQuery):
@@ -280,7 +276,6 @@ async def on_shift(call: CallbackQuery):
         if not shop: return
         shop.is_on_shift = True
         await session.commit()
-        # Отправляем накопленные ночные заказы
         await notify.flush_outbox_for_shop(session, shop.id)
 
     await call.answer("🟢 Вы на смене! Накопленные заказы отправлены.")
@@ -317,7 +312,6 @@ async def my_products(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("shop_prod_view_"))
 async def prod_view(call: CallbackQuery):
-    # ИСПРАВЛЕНО: берем ID через [-1], чтобы не было IndexError
     product_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Product).where(Product.id == product_id))
@@ -366,7 +360,6 @@ async def prod_delete(call: CallbackQuery):
             await session.commit()
             await call.answer("🗑 Удалено", show_alert=True)
         except Exception:
-            # Если товар есть в истории заказов (RESTRICT), просто скрываем
             r = await session.execute(select(Product).where(Product.id == product_id))
             p = r.scalar_one_or_none()
             if p:
@@ -396,8 +389,6 @@ async def edit_price_save(message: Message, state: FSMContext):
 
     data = await state.get_data()
     product_id = data.get("edit_product_id")
-    
-    # Пересчитываем наценку и цену клиента
     markup = config.get_markup(new_price)
     client_price = new_price + markup
 
@@ -688,7 +679,7 @@ async def shop_reject_reason(call: CallbackQuery):
         except Exception: pass
 
 # ═══════════════════════════════════════════
-#   СВОЯ ДОСТАВКА
+#   СВОЯ ДОСТАВКА (С ВВОДОМ РАССТОЯНИЯ)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "shop_create_delivery")
 async def del_start(call: CallbackQuery, state: FSMContext):
@@ -805,26 +796,55 @@ async def del_client_comment_skip(call: CallbackQuery, state: FSMContext):
 async def del_needphoto(call: CallbackQuery, state: FSMContext):
     need = call.data.replace("shop_del_needphoto_", "") == "yes"
     await state.update_data(need_delivery_photo=need)
-    data = await state.get_data()
-
-    distance_km = 3 
-    zone = config.get_delivery_zone(distance_km)
     
-    await state.update_data(distance_km=distance_km, client_pays=zone["client_pays"], courier_fee=zone["courier_gets"], platform_fee=zone["platform_gets"])
+    # БАГ #3 ИСПРАВЛЕН: спрашиваем расстояние вместо хардкода 3 км
+    await state.set_state(ShopDelivery.distance)
+    await call.message.edit_text(
+        "📏 <b>Введите расстояние до клиента (в км):</b>\n\n"
+        "<i>Например: 5.5</i>",
+        reply_markup=kb.cancel_kb("shop_main")
+    )
+    await call.answer()
 
+@router.message(ShopDelivery.distance)
+async def del_set_distance(message: Message, state: FSMContext):
+    try:
+        distance_km = float(message.text.replace(",", ".").strip())
+        if distance_km < 0 or distance_km > config.MAX_DELIVERY_RADIUS:
+            await message.answer(f"❌ Расстояние должно быть от 0 до {config.MAX_DELIVERY_RADIUS} км.")
+            return
+    except ValueError:
+        await message.answer("❌ Введите число (например: 5.5).")
+        return
+
+    zone = config.get_delivery_zone(distance_km)
+    if not zone:
+        await message.answer(f"❌ Расстояние больше максимального ({config.MAX_DELIVERY_RADIUS} км).")
+        return
+
+    await state.update_data(
+        distance_km=distance_km,
+        client_pays=zone["client_pays"],
+        courier_fee=zone["courier_gets"],
+        platform_fee=zone["platform_gets"]
+    )
+    
+    data = await state.get_data()
+    
     text = (
         f"🧾 <b>Проверьте заявку</b>\n\n📍 Куда: {helpers.escape(data['to_address'])}\n"
         f"👤 {helpers.escape(data['client_name'])}, {helpers.escape(data['client_phone'])}\n"
         f"📅 {data['delivery_date']} | 🕒 {data['delivery_slot']}\n"
+        f"📏 Расстояние: {distance_km} км\n"
     )
     if data.get("bouquet_photo_id"): text += "📸 Фото букета: ✅\n"
     if data.get("shop_comment"): text += f"💬 Магазин: {helpers.escape(data['shop_comment'])}\n"
     if data.get("client_comment"): text += f"💬 Клиент: {helpers.escape(data['client_comment'])}\n"
-    text += f"📸 Фото вручения: {'✅ Да' if need else '⏭ Нет'}\n\n💰 <b>Доставка: {helpers.money(zone['client_pays'])}</b>"
+    text += f"📸 Фото вручения: {'✅ Да' if data.get('need_delivery_photo') else '⏭ Нет'}\n\n"
+    text += f"💰 <b>Доставка: {helpers.money(zone['client_pays'])}</b>"
 
     await state.set_state(ShopDelivery.confirm)
-    await call.message.edit_text(text, reply_markup=kb.shop_delivery_confirm())
-    await call.answer()
+    await message.answer(text, reply_markup=kb.shop_delivery_confirm())
 
 @router.callback_query(F.data == "shop_del_confirm", ShopDelivery.confirm)
 async def del_confirm(call: CallbackQuery, state: FSMContext):
