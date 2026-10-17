@@ -33,7 +33,7 @@ async def get_shop(session, tg_id: int):
 
 async def show_shop_menu(message: Message, shop: Shop, edit: bool = False):
     text = (
-        f"🏪 <b>{shop.name}</b>\n"
+        f"🏪 <b>{helpers.escape(shop.name)}</b>\n"
         f"⭐ {float(shop.rating or 0):.1f} | Заказов: {shop.total_orders}\n"
         f"🕒 {shop.work_start} – {shop.work_end}\n"
         f"{'🟢 На смене' if shop.is_on_shift else '🔴 Не на смене'}"
@@ -264,7 +264,7 @@ async def reg_schedule_sun(message: Message, state: FSMContext):
     try:
         await bot_admin.send_message(
             config.ADMIN_ID,
-            f"🏪 <b>Новая заявка магазина</b>\n\n📛 {data['name']}\n📍 {full_address}\n📞 {data['phone']}",
+            f"🏪 <b>Новая заявка магазина</b>\n\n📛 {helpers.escape(data['name'])}\n📍 {helpers.escape(full_address)}\n📞 {data['phone']}",
             reply_markup=kb.admin_approve_shop(shop.id)
         )
     except Exception: pass
@@ -293,9 +293,8 @@ async def off_shift(call: CallbackQuery):
         await session.commit()
     await call.answer("🔴 Вы ушли со смены.")
     await show_shop_menu(call.message, shop, edit=True)
-
-# ═══════════════════════════════════════════
-#   ТОВАРЫ И КАТЕГОРИИ
+    # ═══════════════════════════════════════════
+#   ТОВАРЫ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "shop_my_products")
 async def my_products(call: CallbackQuery):
@@ -316,7 +315,6 @@ async def my_products(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("shop_prod_view_"))
 async def prod_view(call: CallbackQuery):
-    # ИСПРАВЛЕНО: Берем последний элемент, чтобы работало и из карточки, и из кнопки "Скрыть"
     product_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         r = await session.execute(select(Product).where(Product.id == product_id))
@@ -364,7 +362,69 @@ async def prod_delete(call: CallbackQuery):
         await session.commit()
     await call.answer("🗑 Удалено", show_alert=True)
     await my_products(call)
-    @router.callback_query(F.data == "shop_my_categories")
+
+@router.callback_query(F.data.startswith("shop_edit_price_"))
+async def edit_price_start(call: CallbackQuery, state: FSMContext):
+    product_id = int(call.data.split("_")[-1])
+    await state.update_data(edit_product_id=product_id)
+    await state.set_state(ShopEdit.price)
+    await call.message.edit_text("💰 Введите новую цену (₽):", reply_markup=kb.cancel_kb("shop_my_products"))
+    await call.answer()
+
+@router.message(ShopEdit.price)
+async def edit_price_save(message: Message, state: FSMContext):
+    try:
+        new_price = float(message.text.replace(",", ".").strip())
+        if new_price <= 0: raise ValueError
+    except ValueError:
+        await message.answer("❌ Введите число больше 0.")
+        return
+
+    data = await state.get_data()
+    product_id = data.get("edit_product_id")
+    markup = config.get_markup(new_price)
+    client_price = new_price + markup
+
+    async with async_session() as session:
+        r = await session.execute(select(Product).where(Product.id == product_id))
+        p = r.scalar_one_or_none()
+        if p:
+            p.shop_price = Decimal(str(new_price))
+            p.markup = Decimal(str(markup))
+            p.client_price = Decimal(str(client_price))
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Цена обновлена.", reply_markup=kb.shop_products_menu())
+
+@router.callback_query(F.data.startswith("shop_edit_photo_"))
+async def edit_photo_start(call: CallbackQuery, state: FSMContext):
+    product_id = int(call.data.split("_")[-1])
+    await state.update_data(edit_product_id=product_id)
+    await state.set_state(ShopEdit.photo)
+    await call.message.edit_text("📸 Отправьте новое фото товара:", reply_markup=kb.cancel_kb("shop_my_products"))
+    await call.answer()
+
+@router.message(ShopEdit.photo, F.photo)
+async def edit_photo_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    product_id = data.get("edit_product_id")
+    photo_id = message.photo[-1].file_id
+
+    async with async_session() as session:
+        r = await session.execute(select(Product).where(Product.id == product_id))
+        p = r.scalar_one_or_none()
+        if p:
+            p.photo_id = photo_id
+            await session.commit()
+
+    await state.clear()
+    await message.answer("✅ Фото обновлено.", reply_markup=kb.shop_products_menu())
+
+# ═══════════════════════════════════════════
+#   КАТЕГОРИИ
+# ═══════════════════════════════════════════
+@router.callback_query(F.data == "shop_my_categories")
 async def my_categories(call: CallbackQuery):
     async with async_session() as session:
         shop = await get_shop(session, call.from_user.id)
@@ -373,10 +433,8 @@ async def my_categories(call: CallbackQuery):
         cats = result.scalars().all()
 
     text = f"🏷 <b>Категории ({len(cats)})</b>\n\n"
-    for c in cats:
-        text += f"✅ {helpers.category_name(c.category)}\n"
-    if not cats:
-        text = "🏷 Категорий нет."
+    for c in cats: text += f"✅ {helpers.category_name(c.category)}\n"
+    if not cats: text = "🏷 Категорий нет."
 
     await call.message.edit_text(text, reply_markup=kb.shop_categories_menu())
     await call.answer()
@@ -491,10 +549,7 @@ async def add_price(message: Message, state: FSMContext):
 
     rows = [[kb.btn(info["name"], f"shop_prod_cat_{key}")] for key, info in config.CATEGORIES.items()]
     rows.append([kb.btn("❌ Отмена", "shop_main")])
-    await message.answer(
-        f"💰 Ваша: {helpers.money(price)}\n💰 Клиент: {helpers.money(client_price)}\n\n<b>Шаг 5/5:</b> Категория:",
-        reply_markup=kb.kb(rows)
-    )
+    await message.answer(f"💰 Ваша: {helpers.money(price)}\n💰 Клиент: {helpers.money(client_price)}\n\n<b>Шаг 5/5:</b> Категория:", reply_markup=kb.kb(rows))
 
 @router.callback_query(F.data.startswith("shop_prod_cat_"), ShopProduct.category)
 async def add_cat(call: CallbackQuery, state: FSMContext):
@@ -521,8 +576,7 @@ async def add_cat(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text(f"✅ Товар «{helpers.escape(data['title'])}» добавлен!", reply_markup=kb.shop_main(shop.is_on_shift))
     await call.answer()
-
-# ═══════════════════════════════════════════
+    # ═══════════════════════════════════════════
 #   НОВЫЕ ЗАКАЗЫ (ПРИНЯТЬ / ОТКЛОНИТЬ)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "shop_new_orders")
@@ -530,9 +584,7 @@ async def new_orders(call: CallbackQuery):
     async with async_session() as session:
         shop = await get_shop(session, call.from_user.id)
         if not shop: return
-        result = await session.execute(
-            select(Order).where(Order.shop_id == shop.id, Order.status == "new", Order.payment_status == "confirmed").order_by(Order.id.asc())
-        )
+        result = await session.execute(select(Order).where(Order.shop_id == shop.id, Order.status == "new", Order.payment_status == "confirmed").order_by(Order.id.asc()))
         orders = result.scalars().all()
 
     if not orders:
@@ -555,7 +607,6 @@ async def new_orders(call: CallbackQuery):
         )
         try: await call.message.answer(text, reply_markup=kb.shop_order_new(o.id))
         except Exception: pass
-
     await call.answer()
 
 @router.callback_query(F.data.startswith("shop_accept_"))
@@ -682,8 +733,7 @@ async def del_back_period(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("shop_del_slot_"), ShopDelivery.time_slot)
 async def del_slot(call: CallbackQuery, state: FSMContext):
-    parts = call.data.split("_")
-    slot = parts[-1]
+    slot = call.data.split("_")[-1]
     await state.update_data(delivery_slot=slot)
     await state.set_state(ShopDelivery.photo)
     await call.message.edit_text("📸 <b>Шаг 6/9:</b> Фото букета\n\nОтправьте или пропустите.", reply_markup=kb.shop_delivery_photo())
@@ -795,7 +845,7 @@ async def del_paid(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text(f"✅ <b>Заявка #Д-{delivery_id} создана!</b>\n\nЖдём подтверждения админа.", reply_markup=kb.shop_main(shop.is_on_shift))
 
-    try: await bot_admin.send_message(config.ADMIN_ID, f"🚚 <b>Заявка на доставку #Д-{delivery_id}</b>\n\n🏪 {shop.name if shop else '—'}\n💰 {helpers.money(delivery.client_pays)}", reply_markup=kb.admin_confirm_delivery(delivery_id))
+    try: await bot_admin.send_message(config.ADMIN_ID, f"🚚 <b>Заявка на доставку #Д-{delivery_id}</b>\n\n🏪 {helpers.escape(shop.name if shop else '—')}\n💰 {helpers.money(delivery.client_pays)}", reply_markup=kb.admin_confirm_delivery(delivery_id))
     except Exception: pass
     await call.answer()
 
