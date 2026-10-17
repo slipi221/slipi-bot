@@ -16,9 +16,7 @@ from database import Base
 # ═══════════════════════════════════════════
 class Client(Base):
     __tablename__ = "clients"
-    __table_args__ = (
-        Index("ix_clients_tg_id", "tg_id"),
-    )
+    __table_args__ = (Index("ix_clients_tg_id", "tg_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tg_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
     vk_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
@@ -62,10 +60,7 @@ class ClientEvent(Base):
 # ═══════════════════════════════════════════
 class Shop(Base):
     __tablename__ = "shops"
-    __table_args__ = (
-        Index("ix_shops_tg_id", "tg_id"),
-        Index("ix_shops_status", "status"),
-    )
+    __table_args__ = (Index("ix_shops_tg_id", "tg_id"), Index("ix_shops_status", "status"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tg_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
     vk_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
@@ -112,10 +107,7 @@ class ShopCategory(Base):
 # ═══════════════════════════════════════════
 class Product(Base):
     __tablename__ = "products"
-    __table_args__ = (
-        Index("ix_products_shop_id", "shop_id"),
-        Index("ix_products_category", "category"),
-    )
+    __table_args__ = (Index("ix_products_shop_id", "shop_id"), Index("ix_products_category", "category"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id", ondelete="CASCADE"))
     category: Mapped[str] = mapped_column(String(50), default="bouquets")
@@ -140,10 +132,7 @@ class Favorite(Base):
 
 class ShopSubscription(Base):
     __tablename__ = "shop_subscriptions"
-    __table_args__ = (
-        UniqueConstraint("client_id", "shop_id", name="uq_sub"),
-        Index("ix_shop_sub_shop_id", "shop_id"),
-    )
+    __table_args__ = (UniqueConstraint("client_id", "shop_id", name="uq_sub"), Index("ix_shop_sub_shop_id", "shop_id"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"))
     shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id", ondelete="CASCADE"))
@@ -154,10 +143,7 @@ class ShopSubscription(Base):
 # ═══════════════════════════════════════════
 class Courier(Base):
     __tablename__ = "couriers"
-    __table_args__ = (
-        Index("ix_couriers_tg_id", "tg_id"),
-        Index("ix_couriers_status", "status"),
-    )
+    __table_args__ = (Index("ix_couriers_tg_id", "tg_id"), Index("ix_couriers_status", "status"))
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     tg_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
     vk_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
@@ -197,21 +183,18 @@ class CourierDailyStat(Base):
     bonus_earned: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.00"))
 
 # ═══════════════════════════════════════════
-#   КОРЗИНА
+#   КОРЗИНА И ЗАКАЗЫ
 # ═══════════════════════════════════════════
 class CartItem(Base):
     __tablename__ = "cart_items"
-    __table_args__ = (
-        Index("ix_cart_client_id", "client_id"),
-    )
+    __table_args__ = (Index("ix_cart_client_id", "client_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id", ondelete="CASCADE"))
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"))
     shop_id: Mapped[int] = mapped_column(ForeignKey("shops.id", ondelete="CASCADE"))
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-
-# ═══════════════════════════════════════════
+    # ═══════════════════════════════════════════
 #   ЗАКАЗЫ
 # ═══════════════════════════════════════════
 class Order(Base):
@@ -271,7 +254,8 @@ class OrderItem(Base):
     quantity: Mapped[int] = mapped_column(Integer, default=1)
     total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # ═══════════════════════════════════════════
+
+# ═══════════════════════════════════════════
 #   СВОЯ ДОСТАВКА
 # ═══════════════════════════════════════════
 class DeliveryOrder(Base):
@@ -315,9 +299,7 @@ class DeliveryOrder(Base):
 # ═══════════════════════════════════════════
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
-    __table_args__ = (
-        Index("ix_chat_order_id", "order_id"),
-    )
+    __table_args__ = (Index("ix_chat_order_id", "order_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(Integer)
     from_role: Mapped[str] = mapped_column(String(20))
@@ -337,6 +319,7 @@ class Outbox(Base):
     recipient_id: Mapped[int] = mapped_column(Integer) 
     message_text: Mapped[str] = mapped_column(Text)
     reply_markup: Mapped[str | None] = mapped_column(Text, nullable=True)
+    photo_id: Mapped[str | None] = mapped_column(String(255), nullable=True) # ДОБАВЛЕНО ДЛЯ УВЕДОМЛЕНИЙ С ФОТО
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -346,9 +329,7 @@ class Outbox(Base):
 # ═══════════════════════════════════════════
 class Transaction(Base):
     __tablename__ = "transactions"
-    __table_args__ = (
-        Index("ix_trans_user", "user_type", "user_id"),
-    )
+    __table_args__ = (Index("ix_trans_user", "user_type", "user_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_type: Mapped[str] = mapped_column(String(20))
     user_id: Mapped[int] = mapped_column(Integer)
@@ -360,9 +341,7 @@ class Transaction(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
-    __table_args__ = (
-        Index("ix_payment_order_id", "order_id"),
-    )
+    __table_args__ = (Index("ix_payment_order_id", "order_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(Integer)
     client_id: Mapped[int] = mapped_column(Integer)
@@ -405,13 +384,11 @@ class Payout(Base):
     paid_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 # ═══════════════════════════════════════════
-#   ОТЗЫВЫ И ЖАЛОБЫ
+#   ОТЗЫВЫ, ЖАЛОБЫ, ПРОМОКОДЫ
 # ═══════════════════════════════════════════
 class Review(Base):
     __tablename__ = "reviews"
-    __table_args__ = (
-        Index("ix_review_target", "target_type", "target_id"),
-    )
+    __table_args__ = (Index("ix_review_target", "target_type", "target_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(Integer)
     from_tg_id: Mapped[int] = mapped_column(BigInteger)
@@ -435,9 +412,6 @@ class Complaint(Base):
     admin_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
-# ═══════════════════════════════════════════
-#   ПРОМОКОДЫ
-# ═══════════════════════════════════════════
 class Promo(Base):
     __tablename__ = "promos"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -496,9 +470,7 @@ class Log(Base):
 
 class ChangeLog(Base):
     __tablename__ = "change_logs"
-    __table_args__ = (
-        Index("ix_changelog_object", "object_type", "object_id"),
-    )
+    __table_args__ = (Index("ix_changelog_object", "object_type", "object_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     object_type: Mapped[str] = mapped_column(String(20))
     object_id: Mapped[int] = mapped_column(Integer)
