@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — бонусы, рефералка, уровни, достижения
+Flowers Express — бонусы, рефералка, уровни, достижения
 """
 from datetime import datetime, date, timedelta
 from decimal import Decimal
-
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +12,7 @@ from models import (
     Courier, CourierDailyStat, Achievement, CourierAchievement,
     Transaction,
 )
-
+from utils import helpers
 
 # ═══════════════════════════════════════════
 #   ЕЖЕДНЕВНЫЙ БОНУС
@@ -22,27 +21,27 @@ async def calculate_daily_bonus(session: AsyncSession, courier_id: int) -> Decim
     result = await session.execute(
         select(CourierDailyStat).where(
             CourierDailyStat.courier_id == courier_id,
-            CourierDailyStat.date == date.today(),
+            CourierDailyStat.date == helpers.today_moscow(),
         )
     )
     stat = result.scalar_one_or_none()
     if not stat:
-        return Decimal("0")
+        return Decimal("0.00")
 
     groups = stat.completed_orders // 10
     return Decimal(str(groups * config.BONUS_PER_10_ORDERS))
 
-
 async def apply_daily_bonus(session: AsyncSession, courier_id: int) -> Decimal:
+    """Начисляет бонус. Возвращает сумму, которая была начислена (0 если ничего)."""
     result = await session.execute(
         select(CourierDailyStat).where(
             CourierDailyStat.courier_id == courier_id,
-            CourierDailyStat.date == date.today(),
+            CourierDailyStat.date == helpers.today_moscow(),
         )
     )
     stat = result.scalar_one_or_none()
     if not stat:
-        return Decimal("0")
+        return Decimal("0.00")
 
     new_bonus = await calculate_daily_bonus(session, courier_id)
     diff = new_bonus - Decimal(str(stat.bonus_earned))
@@ -58,20 +57,19 @@ async def apply_daily_bonus(session: AsyncSession, courier_id: int) -> Decimal:
             amount=diff, type="bonus",
             comment=f"Бонус за {stat.completed_orders} заказов",
         ))
-
-    await session.commit()
-    return new_bonus
-
+        return diff
+    return Decimal("0.00")
 
 async def apply_all_daily_bonuses(session: AsyncSession):
+    """Начисляет бонусы всем курьерам за сегодня. Один коммит в конце (оптимизация)."""
     result = await session.execute(
-        select(CourierDailyStat).where(CourierDailyStat.date == date.today())
+        select(CourierDailyStat).where(CourierDailyStat.date == helpers.today_moscow())
     )
     stats = result.scalars().all()
     for stat in stats:
         if stat.completed_orders >= 10:
             await apply_daily_bonus(session, stat.courier_id)
-
+    await session.commit()
 
 # ═══════════════════════════════════════════
 #   РЕФЕРАЛЬНАЯ ПРОГРАММА
@@ -81,12 +79,13 @@ async def apply_referral_percent(
     courier_id: int,
     earned_amount: Decimal,
 ):
+    """Начисляет процент рефереру (без коммита, чтобы работало в одной транзакции)."""
     result = await session.execute(select(Courier).where(Courier.id == courier_id))
     courier = result.scalar_one_or_none()
     if not courier or not courier.referred_by:
         return
 
-    if courier.referral_until and courier.referral_until < datetime.now():
+    if courier.referral_until and courier.referral_until < helpers.now_moscow():
         return
 
     ref_bonus = (earned_amount * Decimal(str(config.REFERRAL_PERCENT)) / Decimal("100")).quantize(Decimal("0.01"))
@@ -102,8 +101,6 @@ async def apply_referral_percent(
         amount=ref_bonus, type="referral",
         comment=f"Реферал от курьера #{courier_id}",
     ))
-    await session.commit()
-
 
 async def register_referral(
     session: AsyncSession,
@@ -117,14 +114,13 @@ async def register_referral(
     if not referrer or referrer.id == new_courier_id:
         return False
 
-    until = datetime.now() + timedelta(days=config.REFERRAL_MONTHS * 30)
+    until = helpers.now_moscow() + timedelta(days=config.REFERRAL_MONTHS * 30)
     await session.execute(
         update(Courier).where(Courier.id == new_courier_id)
         .values(referred_by=referrer.id, referral_until=until)
     )
     await session.commit()
     return True
-
 
 # ═══════════════════════════════════════════
 #   УРОВНИ КУРЬЕРОВ
@@ -136,7 +132,6 @@ LEVELS = [
     ("legend",      "👑 Легенда",  501, 5),
 ]
 
-
 def get_level_by_orders(total_orders: int) -> tuple:
     current = LEVELS[0]
     for code, title, threshold, bonus in LEVELS:
@@ -144,15 +139,14 @@ def get_level_by_orders(total_orders: int) -> tuple:
             current = (code, title, threshold, bonus)
     return current
 
-
 def get_next_level(total_orders: int) -> tuple | None:
     for code, title, threshold, bonus in LEVELS:
         if total_orders < threshold:
             return (code, title, threshold, bonus)
     return None
 
-
 async def update_courier_level(session: AsyncSession, courier_id: int):
+    """Обновляет уровень курьера (без коммита)."""
     result = await session.execute(select(Courier).where(Courier.id == courier_id))
     courier = result.scalar_one_or_none()
     if not courier:
@@ -160,8 +154,6 @@ async def update_courier_level(session: AsyncSession, courier_id: int):
     code, _, _, _ = get_level_by_orders(courier.total_orders)
     if courier.level != code:
         courier.level = code
-        await session.commit()
-
 
 # ═══════════════════════════════════════════
 #   ДОСТИЖЕНИЯ
@@ -179,8 +171,8 @@ ACHIEVEMENTS_LIST = [
     {"code": "legend_500",      "title": "👑 Легенда",        "description": "500 заказов за всё время", "icon": "👑"},
 ]
 
-
 async def grant_achievement(session: AsyncSession, courier_id: int, code: str) -> bool:
+    """Выдает ачивку (без коммита). Возвращает True, если выдана новая."""
     ach_result = await session.execute(
         select(Achievement).where(Achievement.code == code)
     )
@@ -206,33 +198,38 @@ async def grant_achievement(session: AsyncSession, courier_id: int, code: str) -
         courier_id=courier_id,
         achievement_id=ach.id,
     ))
-    await session.commit()
     return True
 
-
-async def check_achievements(session: AsyncSession, courier_id: int):
-    """Проверяет и выдаёт достижения."""
-    # Первый заказ
+async def check_achievements(session: AsyncSession, courier_id: int) -> list:
+    """Проверяет и выдает достижения. Возвращает список НОВЫХ кодов ачивок (для уведомлений)."""
+    new_achievements = []
     c_result = await session.execute(select(Courier).where(Courier.id == courier_id))
     courier = c_result.scalar_one_or_none()
-    if courier and courier.total_orders >= 1:
-        await grant_achievement(session, courier_id, "first_order")
-    if courier and courier.total_orders >= 100:
-        await grant_achievement(session, courier_id, "legend_100")
-    if courier and courier.total_orders >= 500:
-        await grant_achievement(session, courier_id, "legend_500")
+    if not courier:
+        return []
 
-    # Спринтер (10 за день)
+    if courier.total_orders >= 1:
+        if await grant_achievement(session, courier_id, "first_order"):
+            new_achievements.append("first_order")
+    if courier.total_orders >= 100:
+        if await grant_achievement(session, courier_id, "legend_100"):
+            new_achievements.append("legend_100")
+    if courier.total_orders >= 500:
+        if await grant_achievement(session, courier_id, "legend_500"):
+            new_achievements.append("legend_500")
+
     result = await session.execute(
         select(CourierDailyStat).where(
             CourierDailyStat.courier_id == courier_id,
-            CourierDailyStat.date == date.today(),
+            CourierDailyStat.date == helpers.today_moscow(),
         )
     )
     stat = result.scalar_one_or_none()
     if stat and stat.completed_orders >= 10:
-        await grant_achievement(session, courier_id, "sprinter")
+        if await grant_achievement(session, courier_id, "sprinter"):
+            new_achievements.append("sprinter")
 
+    return new_achievements
 
 async def get_courier_achievements(session: AsyncSession, courier_id: int) -> list:
     result = await session.execute(
