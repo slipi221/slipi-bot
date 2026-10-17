@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — конфигурация проекта
+Flowers Express (ex-SLIPI) — конфигурация проекта
 """
 import os
 from pathlib import Path
@@ -9,31 +9,38 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ═══════════════════════════════════════════
-#   ТОКЕНЫ (TG и будущие ВК)
+#   НАЗВАНИЕ И БРЕНДИНГ
 # ═══════════════════════════════════════════
-CLIENT_TOKEN  = os.getenv("CLIENT_TOKEN",  "")
-SHOP_TOKEN    = os.getenv("SHOP_TOKEN",    "")
-COURIER_TOKEN = os.getenv("COURIER_TOKEN", "")
-ADMIN_TOKEN   = os.getenv("ADMIN_TOKEN",   "")
+SERVICE_NAME = "Цветочный Экспресс"
+SERVICE_TAG = "flowers_express"
+CITY = "Киров"
 
-# ЗАДЕЛ ПОД ВК (мультиплатформенность)
-VK_CLIENT_TOKEN = os.getenv("VK_CLIENT_TOKEN", "")
-VK_SHOP_TOKEN   = os.getenv("VK_SHOP_TOKEN", "")
+# ═══════════════════════════════════════════
+#   ТОКЕНЫ БОТОВ
+# ═══════════════════════════════════════════
+CLIENT_TOKEN  = os.getenv("CLIENT_TOKEN", "")
+SHOP_TOKEN    = os.getenv("SHOP_TOKEN", "")
+COURIER_TOKEN = os.getenv("COURIER_TOKEN", "")
+ADMIN_TOKEN   = os.getenv("ADMIN_TOKEN", "")
 
 # ═══════════════════════════════════════════
 #   АДМИН
 # ═══════════════════════════════════════════
 ADMIN_ID   = int(os.getenv("ADMIN_ID", 0))
 ADMIN_NAME = "Максим"
+ADMIN_CHANNEL_ID = os.getenv("ADMIN_CHANNEL_ID", "") # ID канала для уведомлений
 
 # ═══════════════════════════════════════════
-#   БАЗА ДАННЫХ (Умный путь для BotHost и локально)
+#   БАЗА ДАННЫХ (Готовимся к PostgreSQL)
 # ═══════════════════════════════════════════
-DATA_DIR = os.getenv("DATA_DIR", "data")
-Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+DATABASE_URL_ENV = os.getenv("DATABASE_URL", "")
 
-# На BotHost переменная DATA_DIR = /app/data, локально это папка "data"
-DATABASE_URL = f"sqlite+aiosqlite:///{DATA_DIR}/slipi.db"
+if DATABASE_URL_ENV:
+    DATABASE_URL = DATABASE_URL_ENV
+else:
+    DATA_DIR = os.getenv("DATA_DIR", "data")
+    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
+    DATABASE_URL = f"sqlite+aiosqlite:///{DATA_DIR}/flowers_express.db"
 
 # ═══════════════════════════════════════════
 #   ОПЛАТА
@@ -48,7 +55,6 @@ SBP_PHONE   = "+7 991 792-92-51"
 # ═══════════════════════════════════════════
 MAX_DELIVERY_RADIUS = 13
 
-# Оставляем твою жесткую сетку, чтобы курьеру за 0-3 км платить 280 руб, а не 262.
 # (от, до, клиент_платит, курьер_получает)
 DELIVERY_ZONES = [
     (0,  3,   350, 280),
@@ -82,8 +88,8 @@ CLIENT_WITHDRAW_COMMISSION = 5
 CLIENT_MIN_WITHDRAW = 500
 COURIER_MIN_WITHDRAW = 500
 
-BONUS_PER_10_ORDERS = 50 # ИСПРАВЛЕНО (было 100, теперь 50 по ТЗ)
-URGENT_BONUS = 50        # ДОБАВЛЕНО: Авто-буст за срочный заказ
+BONUS_PER_10_ORDERS = 50
+URGENT_BONUS = 50
 REFERRAL_PERCENT = 5
 REFERRAL_MONTHS = 3
 
@@ -91,18 +97,24 @@ BOOST_MAX_PERCENT = 20
 BOOST_TRIGGER_MINUTES = 30
 
 # ═══════════════════════════════════════════
-#   БАНКИ
+#   БАНКИ (для выплат)
 # ═══════════════════════════════════════════
 BANKS = [
-    "🔵 Сбербанк", "🔴 Альфа-Банк", "🟡 Тинькофф", "🟢 ВТБ",
-    "🟣 Райффайзен", "⚫ Газпромбанк", "🔵 Россельхозбанк",
-    "🟡 Открытие", "🟠 Совкомбанк", "⚪ Другой",
+    "🔵 Сбербанк",
+    "🔴 Альфа-Банк",
+    "🟡 Тинькофф",
+    "🟢 ВТБ",
+    "🟣 Райффайзен",
+    "⚫ Газпромбанк",
+    "🔵 Россельхозбанк",
+    "🟡 Открытие",
+    "🟠 Совкомбанк",
+    "⚪ Другой",
 ]
 
 # ═══════════════════════════════════════════
 #   ГОРОД И РАБОТА
 # ═══════════════════════════════════════════
-CITY = "Киров"
 WORK_HOURS = "7:00 – 24:00"
 WORK_DAYS = "Пн – Вс"
 WORK_START_HOUR = 7
@@ -124,10 +136,9 @@ PREORDER_DAYS_AHEAD = 2
 # ═══════════════════════════════════════════
 COURIER_GEO_UPDATE_MINUTES = 5
 NEARBY_SHOPS_RADIUS_KM = 20
-SERVICE_NAME = "SLIPI"
-SERVICE_VK = "vk.com/slipi221"
-SERVICE_VK_TG = "@slipi221"
-SUPPORT_TG = "@slipi221"
+SERVICE_VK = "vk.com/flowers_express"
+SERVICE_VK_TG = "@flowers_express"
+SUPPORT_TG = "@flowers_express_support"
 SUPPORT_PHONE = "+7 991 792-92-51"
 
 # ═══════════════════════════════════════════
@@ -220,7 +231,6 @@ def get_delivery_zone(distance_km: float) -> dict | None:
                 "courier_gets": courier_gets, 
                 "platform_gets": client_pays - courier_gets
             }
-    # Если расстояние ровно 13 или чуть больше из-за погрешности округления
     last = DELIVERY_ZONES[-1]
     return {
         "client_pays": last[2], 
