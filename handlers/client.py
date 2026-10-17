@@ -4,13 +4,11 @@ SLIPI — бот клиента
 """
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-
 from aiogram import Router, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, CallbackQuery, BufferedInputFile
+from aiogram.types import Message, CallbackQuery, BufferedInputFile, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.exceptions import TelegramBadRequest
-
 from sqlalchemy import select, delete
 
 import config
@@ -40,7 +38,7 @@ async def get_or_create_client(session, tg_id: int):
     return client
 
 # ═══════════════════════════════════════════
-#   /start
+#   /start И ГЛАВНОЕ МЕНЮ
 # ═══════════════════════════════════════════
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -85,15 +83,38 @@ async def support(call: CallbackQuery):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   КАТАЛОГ
+#   КАТАЛОГ И ГЕОЛОКАЦИЯ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_catalog")
 async def catalog(call: CallbackQuery):
-    await call.message.edit_text(
-        "📍 Чтобы показать ближайшие магазины, поделитесь геолокацией.",
+    # Отправляем нативную кнопку геолокации
+    await call.message.delete()
+    await call.message.answer(
+        "📍 Нажмите на кнопку внизу экрана, чтобы показать ближайшие магазины.\n"
+        "Или выберите «Показать все магазины».",
         reply_markup=kb.client_geo()
     )
+    await call.message.answer("⬇️ Нажмите кнопку ниже:", reply_markup=kb.get_geo_kb())
     await call.answer()
+
+@router.message(F.location)
+async def got_location(message: Message):
+    # Убираем клавиатуру с гео
+    await message.answer("Геопозиция получена! 🔍 Ищем магазины...", reply_markup=ReplyKeyboardRemove())
+    
+    async with async_session() as session:
+        client = await get_or_create_client(session, message.from_user.id)
+        client.lat = message.location.latitude
+        client.lon = message.location.longitude
+        await session.commit()
+        shops = await geo_service.find_nearby_shops(session, message.location.latitude, message.location.longitude)
+
+    if not shops:
+        await message.answer("😔 Рядом нет магазинов. Попробуйте «Показать все».", reply_markup=kb.client_geo())
+        return
+
+    items = [{"id": s["id"], "name": s["name"], "rating": s["rating"]} for s in shops]
+    await message.answer(f"📍 <b>Ближайшие к вам ({len(items)})</b>", reply_markup=kb.client_shops(items, 0))
 
 @router.callback_query(F.data == "client_all_shops")
 async def all_shops(call: CallbackQuery):
@@ -110,22 +131,6 @@ async def all_shops(call: CallbackQuery):
     )
     await call.answer()
 
-@router.message(F.location)
-async def got_location(message: Message):
-    async with async_session() as session:
-        client = await get_or_create_client(session, message.from_user.id)
-        client.lat = message.location.latitude
-        client.lon = message.location.longitude
-        await session.commit()
-        shops = await geo_service.find_nearby_shops(session, message.location.latitude, message.location.longitude)
-
-    if not shops:
-        await message.answer("😔 Рядом нет магазинов. Попробуйте «Показать все».", reply_markup=kb.client_geo())
-        return
-
-    items = [{"id": s["id"], "name": s["name"], "rating": s["rating"]} for s in shops]
-    await message.answer(f"📍 <b>Ближайшие к вам ({len(items)})</b>", reply_markup=kb.client_shops(items, 0))
-
 @router.callback_query(F.data.startswith("shops_page_"))
 async def shops_page(call: CallbackQuery):
     page = int(call.data.split("_")[-1])
@@ -137,11 +142,11 @@ async def shops_page(call: CallbackQuery):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   КАРТОЧКА МАГАЗИНА И ТОВАРЫ
+#   КАРТОЧКА МАГАЗИНА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("shop_") & ~F.data.startswith("shop_products_") & ~F.data.startswith("shop_hits_") & ~F.data.startswith("shop_reviews_") & ~F.data.startswith("shop_call_") & ~F.data.startswith("shop_subscribe_"))
 async def shop_card(call: CallbackQuery):
-    try: shop_id = int(call.data.split("_")[1])
+    try: shop_id = int(call.data.split("_")[-1])
     except (IndexError, ValueError): return
 
     async with async_session() as session:
@@ -153,13 +158,25 @@ async def shop_card(call: CallbackQuery):
         sub_result = await session.execute(select(ShopSubscription).where(ShopSubscription.client_id == client.id, ShopSubscription.shop_id == shop_id))
         is_subscribed = sub_result.scalar_one_or_none() is not None
 
-    text = f"🏪 <b>{shop.name}</b>\n⭐ {float(shop.rating or 0):.1f} ({shop.reviews_count})\n📍 {shop.address or '—'}\n🕒 {shop.work_start} – {shop.work_end}"
-    await call.message.edit_text(text, reply_markup=kb.shop_card(shop_id, is_subscribed))
+    text = f"🏪 <b>{helpers.escape(shop.name)}</b>\n⭐ {float(shop.rating or 0):.1f} ({shop.reviews_count})\n📍 {helpers.escape(shop.address or '—')}\n🕒 {shop.work_start} – {shop.work_end}"
+    await call.message.edit_text(text, reply_markup=kb.shop_card(shop_id, is_subscribed, shop.phone))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("shop_call_"))
+async def shop_call(call: CallbackQuery):
+    shop_id = int(call.data.split("_")[-1])
+    async with async_session() as session:
+        r = await session.execute(select(Shop).where(Shop.id == shop_id))
+        shop = r.scalar_one_or_none()
+    if shop and shop.phone:
+        await call.message.answer(f"📞 Телефон магазина: <code>{shop.phone}</code>")
+    else:
+        await call.message.answer("📞 Магазин не указал телефон.")
     await call.answer()
 
 @router.callback_query(F.data.startswith("shop_subscribe_"))
 async def shop_subscribe(call: CallbackQuery):
-    shop_id = int(call.data.split("_")[2])
+    shop_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         client = await get_or_create_client(session, call.from_user.id)
         result = await session.execute(select(ShopSubscription).where(ShopSubscription.client_id == client.id, ShopSubscription.shop_id == shop_id))
@@ -174,9 +191,54 @@ async def shop_subscribe(call: CallbackQuery):
             await call.answer("❤️ Подписались")
     await shop_card(call)
 
+@router.callback_query(F.data.startswith("shop_hits_"))
+async def shop_hits(call: CallbackQuery):
+    shop_id = int(call.data.split("_")[-1])
+    async with async_session() as session:
+        result = await session.execute(
+            select(Product).where(
+                Product.shop_id == shop_id, Product.is_active == True, Product.is_draft == False, Product.order_count >= 1
+            ).order_by(Product.order_count.desc()).limit(5)
+        )
+        products = result.scalars().all()
+
+    if not products:
+        await call.answer("🔥 Хитов продаж пока нет", show_alert=True)
+        return
+
+    items = [{"id": p.id, "title": p.title, "price": helpers.money(p.client_price)} for p in products]
+    await call.message.edit_text(f"🔥 <b>Хиты продаж ({len(products)})</b>", reply_markup=kb.products_list(shop_id, "hits", items, 0, total=len(products)))
+    await call.answer()
+
+@router.callback_query(F.data.startswith("shop_reviews_"))
+async def shop_reviews(call: CallbackQuery):
+    shop_id = int(call.data.split("_")[-1])
+    async with async_session() as session:
+        result = await session.execute(
+            select(Review).where(Review.target_type == "shop", Review.target_id == shop_id).order_by(Review.id.desc()).limit(5)
+        )
+        reviews = result.scalars().all()
+
+    if not reviews:
+        await call.message.edit_text("⭐ <b>Отзывов пока нет.</b>", reply_markup=kb.client_back(f"shop_{shop_id}"))
+        await call.answer()
+        return
+
+    text = "⭐ <b>Последние отзывы:</b>\n\n"
+    for r in reviews:
+        text += f"{'⭐' * r.rating}\n"
+        if r.comment: text += f"💬 {helpers.escape(r.comment[:100])}\n"
+        text += "\n"
+
+    await call.message.edit_text(text, reply_markup=kb.client_back(f"shop_{shop_id}"))
+    await call.answer()
+
+# ═══════════════════════════════════════════
+#   ТОВАРЫ
+# ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("shop_products_"))
 async def shop_products(call: CallbackQuery):
-    shop_id = int(call.data.split("_")[2])
+    shop_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         result = await session.execute(select(Product.category, Product.id).where(Product.shop_id == shop_id, Product.is_active == True, Product.is_draft == False))
         rows = result.all()
@@ -188,11 +250,7 @@ async def shop_products(call: CallbackQuery):
         return
 
     categories = [(key, helpers.category_name(key), cnt) for key, cnt in cats_count.items()]
-    try:
-        await call.message.edit_text("🗂 <b>Выберите категорию:</b>", reply_markup=kb.shop_categories(shop_id, categories))
-    except TelegramBadRequest:
-        await call.message.delete()
-        await call.message.answer("🗂 <b>Выберите категорию:</b>", reply_markup=kb.shop_categories(shop_id, categories))
+    await call.message.edit_text("🗂 <b>Выберите категорию:</b>", reply_markup=kb.shop_categories(shop_id, categories))
     await call.answer()
 
 @router.callback_query(F.data.startswith("cat_"))
@@ -203,7 +261,7 @@ async def show_category(call: CallbackQuery):
     async with async_session() as session:
         q = select(Product).where(Product.shop_id == shop_id, Product.is_active == True, Product.is_draft == False)
         if category != "all": q = q.where(Product.category == category)
-        result = await session.execute(q.limit(50))
+        result = await session.execute(q)
         products = result.scalars().all()
 
     if not products:
@@ -211,11 +269,7 @@ async def show_category(call: CallbackQuery):
         return
 
     items = [{"id": p.id, "title": p.title, "price": helpers.money(p.client_price)} for p in products[:5]]
-    try:
-        await call.message.edit_text(f"📦 <b>Товары ({len(products)})</b>", reply_markup=kb.products_list(shop_id, category, items, 0))
-    except TelegramBadRequest:
-        await call.message.delete()
-        await call.message.answer(f"📦 <b>Товары ({len(products)})</b>", reply_markup=kb.products_list(shop_id, category, items, 0))
+    await call.message.edit_text(f"📦 <b>Товары ({len(products)})</b>", reply_markup=kb.products_list(shop_id, category, items, 0, total=len(products)))
     await call.answer()
 
 @router.callback_query(F.data.startswith("prods_"))
@@ -225,29 +279,22 @@ async def prods_page(call: CallbackQuery):
 
     async with async_session() as session:
         q = select(Product).where(Product.shop_id == shop_id, Product.is_active == True, Product.is_draft == False)
-        if category != "all": q = q.where(Product.category == category)
-        result = await session.execute(q.limit(100))
+        if category != "all" and category != "hits": q = q.where(Product.category == category)
+        result = await session.execute(q)
         products = result.scalars().all()
 
     page_items = products[page * 5:(page * 5) + 5]
     items = [{"id": p.id, "title": p.title, "price": helpers.money(p.client_price)} for p in page_items]
-    try:
-        await call.message.edit_text(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page))
-    except TelegramBadRequest:
-        await call.message.delete()
-        await call.message.answer(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page))
+    await call.message.edit_text(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page, total=len(products)))
     await call.answer()
-    # ЖЕЛЕЗОБЕТОННАЯ КАРТОЧКА ТОВАРА С ФОТО
+
+# ЖЕЛЕЗОБЕТОННАЯ КАРТОЧКА ТОВАРА
 @router.callback_query(F.data.startswith("product_"))
 async def product_card(call: CallbackQuery):
-    try: 
-        product_id = int(call.data.split("_")[1])
-    except (IndexError, ValueError): 
-        return
-
+    product_id = int(call.data.split("_")[-1])
     async with async_session() as session:
-        result = await session.execute(select(Product).where(Product.id == product_id))
-        product = result.scalar_one_or_none()
+        r = await session.execute(select(Product).where(Product.id == product_id))
+        product = r.scalar_one_or_none()
         if not product:
             await call.answer("Товар не найден", show_alert=True)
             return
@@ -256,36 +303,30 @@ async def product_card(call: CallbackQuery):
         fav_result = await session.execute(select(Favorite).where(Favorite.client_id == client.id, Favorite.product_id == product_id))
         in_fav = fav_result.scalar_one_or_none() is not None
 
-    text = f"💐 <b>{product.title}</b>\n\n📝 {product.description or '—'}\n\n💰 <b>{helpers.money(product.client_price)}</b>"
+    text = f"💐 <b>{helpers.escape(product.title)}</b>\n\n📝 {helpers.escape(product.description or '—')}\n\n💰 <b>{helpers.money(product.client_price)}</b>"
     markup = kb.product_card(product_id, in_fav)
 
     sent = False
     if product.photo_id:
         try:
-            # 1. Скачиваем файл через бота магазина
             file = await bot_shop.get_file(product.photo_id)
             file_bytes = await bot_shop.download_file(file.file_path)
-            
-            # 2. Отправляем как новый файл через клиентского бота
             photo_input = BufferedInputFile(file_bytes.read(), filename="product.jpg")
             await call.message.answer_photo(photo=photo_input, caption=text, reply_markup=markup)
             sent = True
         except Exception as e:
-            print(f"Ошибка скачивания/отправки фото: {e}")
-            pass
+            print(f"Ошибка фото: {e}")
 
     if not sent:
         await call.message.answer(text, reply_markup=markup)
 
-    try:
-        await call.message.delete()
-    except TelegramBadRequest:
-        pass
+    try: await call.message.delete()
+    except TelegramBadRequest: pass
     await call.answer()
 
 @router.callback_query(F.data.startswith("fav_toggle_"))
 async def fav_toggle(call: CallbackQuery):
-    product_id = int(call.data.split("_")[2])
+    product_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         client = await get_or_create_client(session, call.from_user.id)
         result = await session.execute(select(Favorite).where(Favorite.client_id == client.id, Favorite.product_id == product_id))
@@ -293,14 +334,14 @@ async def fav_toggle(call: CallbackQuery):
         if fav:
             await session.delete(fav)
             await session.commit()
-            await call.answer("💔 Удалено")
+            await call.answer("💔 Удалено из избранного")
         else:
             session.add(Favorite(client_id=client.id, product_id=product_id))
             await session.commit()
-            await call.answer("❤️ Добавлено")
-
-# ═══════════════════════════════════════════
-#   КОРЗИНА (С ЗАЩИТОЙ ОТ ОШИБКИ РЕДАКТИРОВАНИЯ)
+            await call.answer("❤️ Добавлено в избранное")
+    await product_card(call)
+    # ═══════════════════════════════════════════
+#   КОРЗИНА (С ОТОБРАЖЕНИЕМ МАГАЗИНА)
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_cart")
 async def open_cart(call: CallbackQuery):
@@ -308,7 +349,7 @@ async def open_cart(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cart_add_"))
 async def cart_add(call: CallbackQuery):
-    product_id = int(call.data.split("_")[2])
+    product_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         client = await get_or_create_client(session, call.from_user.id)
         p_result = await session.execute(select(Product).where(Product.id == product_id))
@@ -320,6 +361,7 @@ async def cart_add(call: CallbackQuery):
         cart_result = await session.execute(select(CartItem).where(CartItem.client_id == client.id))
         cart_items = cart_result.scalars().all()
 
+        # Проверка на разные магазины
         if cart_items and cart_items[0].shop_id != product.shop_id:
             await call.answer("⚠️ В корзине уже есть товар из другого магазина.", show_alert=True)
             return
@@ -335,31 +377,35 @@ async def cart_add(call: CallbackQuery):
 async def cart_view(call: CallbackQuery):
     async with async_session() as session:
         client = await get_or_create_client(session, call.from_user.id)
-        result = await session.execute(select(CartItem, Product).join(Product, Product.id == CartItem.product_id).where(CartItem.client_id == client.id))
+        # Подтягиваем сразу и корзину, и товары, и магазин
+        result = await session.execute(
+            select(CartItem, Product, Shop)
+            .join(Product, Product.id == CartItem.product_id)
+            .join(Shop, Shop.id == CartItem.shop_id)
+            .where(CartItem.client_id == client.id)
+        )
         rows = result.all()
 
     if not rows:
-        try:
-            await call.message.edit_text("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
-        except TelegramBadRequest:
-            await call.message.delete()
-            await call.message.answer("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
-        await call.answer()
+        await call.message.edit_text("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
         return
 
-    text = "🛒 <b>Ваша корзина</b>\n\n"
+    # Берем название магазина из первой строки
+    shop_name = rows[0][2].name
+
+    text = f"🛒 <b>Ваша корзина</b>\n"
+    text += f"🏪 Магазин: <b>{helpers.escape(shop_name)}</b>\n\n"
+    
     total = Decimal("0")
-    for ci, p in rows:
+    for ci, p, _ in rows:
         line = Decimal(str(p.client_price)) * ci.quantity
         total += line
-        text += f"• {p.title} × {ci.quantity} = {helpers.money(line)}\n"
+        text += f"• {helpers.escape(p.title)} × {ci.quantity} = {helpers.money(line)}\n"
 
     text += f"\n🚚 Доставка рассчитывается по адресу"
     text += f"\n<b>Итого (без доставки): {helpers.money(total)}</b>"
     
-    # Защита от ошибки "there is no text in the message to edit"
-    try:
-        await call.message.edit_text(text, reply_markup=kb.cart_view())
+    try: await call.message.edit_text(text, reply_markup=kb.cart_view())
     except TelegramBadRequest:
         await call.message.delete()
         await call.message.answer(text, reply_markup=kb.cart_view())
@@ -370,12 +416,13 @@ async def cart_view(call: CallbackQuery):
 async def cart_edit(call: CallbackQuery):
     async with async_session() as session:
         client = await get_or_create_client(session, call.from_user.id)
-        result = await session.execute(select(CartItem, Product).join(Product, Product.id == CartItem.product_id).where(CartItem.client_id == client.id))
+        result = await session.execute(
+            select(CartItem, Product).join(Product, Product.id == CartItem.product_id).where(CartItem.client_id == client.id)
+        )
         rows = result.all()
 
     items = [(ci.id, p.title, ci.quantity) for ci, p in rows]
-    try:
-        await call.message.edit_text("✏️ <b>Изменить количество:</b>", reply_markup=kb.cart_edit(items))
+    try: await call.message.edit_text("✏️ <b>Изменить количество:</b>", reply_markup=kb.cart_edit(items))
     except TelegramBadRequest:
         await call.message.delete()
         await call.message.answer("✏️ <b>Изменить количество:</b>", reply_markup=kb.cart_edit(items))
@@ -383,7 +430,7 @@ async def cart_edit(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cart_plus_"))
 async def cart_plus(call: CallbackQuery):
-    item_id = int(call.data.split("_")[2])
+    item_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         result = await session.execute(select(CartItem).where(CartItem.id == item_id))
         ci = result.scalar_one_or_none()
@@ -394,7 +441,7 @@ async def cart_plus(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cart_minus_"))
 async def cart_minus(call: CallbackQuery):
-    item_id = int(call.data.split("_")[2])
+    item_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         result = await session.execute(select(CartItem).where(CartItem.id == item_id))
         ci = result.scalar_one_or_none()
@@ -408,12 +455,13 @@ async def cart_minus(call: CallbackQuery):
 async def cart_remove_menu(call: CallbackQuery):
     async with async_session() as session:
         client = await get_or_create_client(session, call.from_user.id)
-        result = await session.execute(select(CartItem, Product).join(Product, Product.id == CartItem.product_id).where(CartItem.client_id == client.id))
+        result = await session.execute(
+            select(CartItem, Product).join(Product, Product.id == CartItem.product_id).where(CartItem.client_id == client.id)
+        )
         rows = result.all()
 
     items = [(ci.id, p.title) for ci, p in rows]
-    try:
-        await call.message.edit_text("🗑 <b>Что удалить?</b>", reply_markup=kb.cart_remove_menu(items))
+    try: await call.message.edit_text("🗑 <b>Что удалить?</b>", reply_markup=kb.cart_remove_menu(items))
     except TelegramBadRequest:
         await call.message.delete()
         await call.message.answer("🗑 <b>Что удалить?</b>", reply_markup=kb.cart_remove_menu(items))
@@ -421,7 +469,7 @@ async def cart_remove_menu(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("cart_del_"))
 async def cart_del(call: CallbackQuery):
-    item_id = int(call.data.split("_")[2])
+    item_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         await session.execute(delete(CartItem).where(CartItem.id == item_id))
         await session.commit()
@@ -433,12 +481,12 @@ async def cart_clear(call: CallbackQuery):
         client = await get_or_create_client(session, call.from_user.id)
         await session.execute(delete(CartItem).where(CartItem.client_id == client.id))
         await session.commit()
-    try:
-        await call.message.edit_text("🗑 Корзина очищена.", reply_markup=kb.cart_empty())
+    try: await call.message.edit_text("🗑 Корзина очищена.", reply_markup=kb.cart_empty())
     except TelegramBadRequest:
         await call.message.delete()
         await call.message.answer("🗑 Корзина очищена.", reply_markup=kb.cart_empty())
-        # ═══════════════════════════════════════════
+
+# ═══════════════════════════════════════════
 #   ОФОРМЛЕНИЕ ЗАКАЗА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "cart_checkout")
@@ -466,7 +514,7 @@ async def order_new_addr(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("order_addr_"), OrderFSM.address)
 async def order_use_addr(call: CallbackQuery, state: FSMContext):
-    addr_id = int(call.data.split("_")[2])
+    addr_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         result = await session.execute(select(ClientAddress).where(ClientAddress.id == addr_id))
         addr = result.scalar_one_or_none()
@@ -618,11 +666,10 @@ async def order_photo_no(call: CallbackQuery, state: FSMContext):
     await show_order_confirm(call.message, state, edit=True)
     await call.answer()
 
-# ФУНКЦИЯ ПОДСЧЕТА ИТОГА (С УЧЕТОМ СКИДКИ)
+# ФУНКЦИЯ ПОДСЧЕТА ИТОГА
 async def get_cart_totals(session, client_id: int, distance_km: float):
     result = await session.execute(select(CartItem, Product).join(Product, Product.id == CartItem.product_id).where(CartItem.client_id == client_id))
     rows = result.all()
-    
     items = [{"product": p, "quantity": ci.quantity} for ci, p in rows]
     totals = orders_service.calculate_cart_total(items, distance_km)
     return rows, totals
@@ -637,7 +684,7 @@ async def show_order_confirm(message: Message, state: FSMContext, edit: bool = F
 
     text = "🧾 <b>Проверьте заказ</b>\n\n"
     for ci, p in rows:
-        text += f"• {p.title} × {ci.quantity} = {helpers.money(Decimal(str(p.client_price)) * ci.quantity)}\n"
+        text += f"• {helpers.escape(p.title)} × {ci.quantity} = {helpers.money(Decimal(str(p.client_price)) * ci.quantity)}\n"
 
     if totals["discount"] > 0:
         text += f"\n🎁 Скидка 3%: -{helpers.money(totals['discount'])}"
@@ -645,7 +692,7 @@ async def show_order_confirm(message: Message, state: FSMContext, edit: bool = F
     if data.get("promo_code"):
         text += f"\n🏷 Промокод: {data['promo_code']}"
     
-    text += f"\n\n📍 {data.get('address')}\n👤 {data.get('client_name')}\n📞 {data.get('client_phone')}"
+    text += f"\n\n📍 {helpers.escape(data.get('address'))}\n👤 {helpers.escape(data.get('client_name'))}\n📞 {helpers.escape(data.get('client_phone'))}"
     text += f"\n📅 {data.get('delivery_date')} | 🕒 {data.get('delivery_slot')}"
     text += f"\n📸 Фото вручения: {'Да' if data.get('need_photo') else 'Нет'}"
     text += f"\n\n<b>Итого: {helpers.money(totals['total'])}</b>"
@@ -698,10 +745,17 @@ async def order_paid(call: CallbackQuery, state: FSMContext):
         await call.message.edit_text("❌ Не удалось создать заказ.", reply_markup=kb.client_main())
         return
 
-    await call.message.edit_text(
+    msg = await call.message.edit_text(
         f"✅ <b>Заказ #{order.id} создан!</b>\n\n💳 В комментарии укажите: <code>{order.id}</code>\n\nОжидаем подтверждения оплаты.",
         reply_markup=kb.client_main()
     )
+    
+    async with async_session() as session:
+        o_r = await session.execute(select(Order).where(Order.id == order.id))
+        o = o_r.scalar_one_or_none()
+        if o:
+            o.client_message_id = msg.message_id
+            await session.commit()
 
     try:
         await bot_admin.send_message(
@@ -743,7 +797,7 @@ async def my_orders(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("track_refresh_"))
 async def track_refresh(call: CallbackQuery):
-    order_id = int(call.data.split("_")[2])
+    order_id = int(call.data.split("_")[-1])
     await show_track(call.message, order_id, edit=True)
     await call.answer("Обновлено")
 
@@ -759,7 +813,7 @@ async def show_track(message: Message, order_id: int, edit: bool = False):
             courier = c_result.scalar_one_or_none()
 
     status_map = {
-        "pending": "⏳ Ожидает подтверждения оплаты", "new": "🆕 Новый заказ",
+        "pending": "⏳ Ожидает подтверждения оплаты", "new": "🆕 Оплачен, ждет магазина",
         "wait": "🔍 Ищем курьера", "going": "🚴 Курьер едет в магазин",
         "picked": "📦 Курьер забрал букет", "delivering": "🚴 Курьер везёт вам",
         "at_client": "📍 Курьер у вас", "done": "✅ Доставлено", "cancel": "❌ Отменено",
@@ -768,13 +822,13 @@ async def show_track(message: Message, order_id: int, edit: bool = False):
 
     text = (
         f"📦 <b>Заказ #{order.id}</b>\n\n"
-        f"📍 {order.address}\n💰 {helpers.money(order.total_price)}\n"
+        f"📍 {helpers.escape(order.address)}\n💰 {helpers.money(order.total_price)}\n"
         f"🕒 {helpers.format_date(order.delivery_date)} {order.delivery_slot or ''}\n\n"
         f"━━━━━━━━━━━━━━━\n<b>{status_text}</b>\n"
     )
 
     if courier and order.status in ("going", "picked", "delivering", "at_client"):
-        text += f"\n👤 Курьер: {courier.name}\n⭐ {float(courier.rating or 0):.1f}"
+        text += f"\n👤 Курьер: {helpers.escape(courier.name)}\n⭐ {float(courier.rating or 0):.1f}"
         if courier.lat and order.lat and courier.lon and order.lon:
             dist = helpers.distance_km(float(courier.lat), float(courier.lon), float(order.lat), float(order.lon))
             eta = helpers.calculate_eta(dist, courier.transport or "Авто")
@@ -794,7 +848,7 @@ async def show_track(message: Message, order_id: int, edit: bool = False):
 
 @router.callback_query(F.data.startswith("track_cancel_") & ~F.data.startswith("track_cancel_yes_"))
 async def track_cancel(call: CallbackQuery):
-    order_id = int(call.data.split("_")[2])
+    order_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         result = await session.execute(select(Order).where(Order.id == order_id))
         order = result.scalar_one_or_none()
@@ -811,7 +865,7 @@ async def track_cancel(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("track_cancel_yes_"))
 async def track_cancel_yes(call: CallbackQuery):
-    order_id = int(call.data.split("_")[3])
+    order_id = int(call.data.split("_")[-1])
     async with async_session() as session:
         order = await orders_service.cancel_order(session, order_id, reason="client_cancelled", cancelled_by="client", refund=True)
     if not order:
@@ -821,59 +875,11 @@ async def track_cancel_yes(call: CallbackQuery):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   РЕДАКТИРОВАНИЕ ЗАКАЗА КЛИЕНТОМ
-# ═══════════════════════════════════════════
-@router.callback_query(F.data.startswith("track_edit_"))
-async def track_edit(call: CallbackQuery):
-    order_id = int(call.data.split("_")[2])
-    await call.message.edit_text("✏️ <b>Что изменить?</b>", reply_markup=kb.order_edit_menu(order_id))
-    await call.answer()
-
-@router.callback_query(F.data.startswith("oe_"))
-async def order_edit_field_start(call: CallbackQuery, state: FSMContext):
-    parts = call.data.split("_")
-    field, order_id = parts[1], int(parts[2])
-
-    field_names = {"addr": "адрес", "name": "имя получателя", "phone": "телефон", "time": "время", "comment": "комментарий"}
-    await state.update_data(edit_order_id=order_id, edit_field=field)
-    await state.set_state(ClientFSM.edit_order_field)
-    await call.message.edit_text(f"✏️ Введите новое значение для «{field_names.get(field, field)}»:", reply_markup=kb.cancel_kb(f"track_refresh_{order_id}"))
-    await call.answer()
-
-@router.message(ClientFSM.edit_order_field)
-async def order_edit_field_save(message: Message, state: FSMContext):
-    data = await state.get_data()
-    order_id, field_key = data.get("edit_order_id"), data.get("edit_field")
-
-    field_map = {"addr": "address", "name": "client_name", "phone": "client_phone", "time": "delivery_slot", "comment": "comment"}
-    db_field = field_map.get(field_key)
-    new_value = message.text.strip()
-
-    async with async_session() as session:
-        ok = await orders_service.edit_order_field(session, order_id, db_field, new_value, changed_by="client", changed_by_id=message.from_user.id)
-        if not ok:
-            await message.answer("❌ Изменение невозможно (заказ уже в работе).")
-            await state.clear()
-            return
-
-        o_r = await session.execute(select(Order).where(Order.id == order_id))
-        order = o_r.scalar_one_or_none()
-        if order and order.courier_id:
-            cr = await session.execute(select(Courier).where(Courier.id == order.courier_id))
-            courier = cr.scalar_one_or_none()
-            if courier and courier.tg_id:
-                try: await bot_courier.send_message(courier.tg_id, f"⚠️ <b>Клиент изменил заказ #{order_id}</b>\n\nПроверьте детали!")
-                except Exception: pass
-
-    await state.clear()
-    await message.answer("✅ Изменено!", reply_markup=kb.client_main())
-
-# ═══════════════════════════════════════════
 #   ОТЗЫВЫ И ИЗБРАННОЕ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("rate_start_"))
 async def rate_start(call: CallbackQuery):
-    order_id = int(call.data.split("_")[2])
+    order_id = int(call.data.split("_")[-1])
     await call.message.edit_text("⭐ <b>Оцените магазин:</b>", reply_markup=kb.rating_kb("shop", order_id))
     await call.answer()
 
@@ -984,25 +990,6 @@ async def balance(call: CallbackQuery):
     await call.message.edit_text(text, reply_markup=kb.client_balance())
     await call.answer()
 
-@router.callback_query(F.data == "balance_history")
-async def balance_history(call: CallbackQuery):
-    async with async_session() as session:
-        client = await get_or_create_client(session, call.from_user.id)
-        txs = await payments_service.get_user_transactions(session, "client", client.id, 30)
-
-    if not txs:
-        await call.message.edit_text("📜 История пуста.", reply_markup=kb.client_back("client_balance"))
-        await call.answer()
-        return
-
-    text = "📜 <b>История операций:</b>\n\n"
-    for t in txs:
-        sign = "+" if float(t.amount) >= 0 else ""
-        text += f"{helpers.format_dt(t.created_at)} — {sign}{helpers.money(t.amount)} — {t.type}\n"
-
-    await call.message.edit_text(text, reply_markup=kb.client_back("client_balance"))
-    await call.answer()
-
 @router.callback_query(F.data == "client_promo")
 async def promo_menu(call: CallbackQuery, state: FSMContext):
     await state.set_state(ClientFSM.promo_input)
@@ -1052,7 +1039,7 @@ async def events(call: CallbackQuery):
     else:
         text = f"📅 <b>Мои события ({len(events_list)})</b>\n\n"
         for e in events_list:
-            text += f"• {helpers.format_date(e.event_date)} — {e.title}\n"
+            text += f"• {helpers.format_date(e.event_date)} — {helpers.escape(e.title)}\n"
 
     await call.message.edit_text(text, reply_markup=kb.events_menu())
     await call.answer()
@@ -1070,17 +1057,6 @@ async def event_set_whom(call: CallbackQuery, state: FSMContext):
     await state.set_state(ClientFSM.event_date)
     await call.message.edit_text("📅 <b>Когда?</b>\n\nВведите дату ДД.ММ.ГГГГ\nПример: 15.05.1990", reply_markup=kb.cancel_kb("client_main"))
     await call.answer()
-
-@router.callback_query(F.data == "event_whom_custom", ClientFSM.event_whom)
-async def event_custom_whom(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("✏️ Введите имя:", reply_markup=kb.cancel_kb("client_main"))
-    await call.answer()
-
-@router.message(ClientFSM.event_whom)
-async def event_set_custom_whom(message: Message, state: FSMContext):
-    await state.update_data(event_whom=message.text.strip())
-    await state.set_state(ClientFSM.event_date)
-    await message.answer("📅 <b>Когда?</b>\n\nВведите дату ДД.ММ.ГГГГ", reply_markup=kb.cancel_kb("client_main"))
 
 @router.message(ClientFSM.event_date)
 async def event_set_date(message: Message, state: FSMContext):
@@ -1107,26 +1083,5 @@ async def event_set_type(call: CallbackQuery, state: FSMContext):
         await session.commit()
 
     await state.clear()
-    await call.message.edit_text(f"✅ Событие добавлено!\n\n📅 {data['event_date']} — {title}", reply_markup=kb.client_main())
+    await call.message.edit_text(f"✅ Событие добавлено!\n\n📅 {data['event_date']} — {helpers.escape(title)}", reply_markup=kb.client_main())
     await call.answer()
-
-@router.callback_query(F.data == "event_type_custom", ClientFSM.event_type)
-async def event_custom_type(call: CallbackQuery, state: FSMContext):
-    await call.message.edit_text("✏️ Введите название события:", reply_markup=kb.cancel_kb("client_main"))
-    await call.answer()
-
-@router.message(ClientFSM.event_type)
-async def event_set_custom_type(message: Message, state: FSMContext):
-    data = await state.get_data()
-    title = message.text.strip()
-
-    async with async_session() as session:
-        client = await get_or_create_client(session, message.from_user.id)
-        session.add(ClientEvent(
-            client_id=client.id, title=title, event_type="other",
-            event_date=datetime.strptime(data["event_date"], "%Y-%m-%d").date(),
-        ))
-        await session.commit()
-
-    await state.clear()
-    await message.answer(f"✅ Событие «{title}» добавлено!", reply_markup=kb.client_main())
