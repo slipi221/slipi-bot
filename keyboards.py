@@ -2,7 +2,7 @@
 """
 SLIPI — все клавиатуры (Inline-кнопки)
 """
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 import config
@@ -22,6 +22,13 @@ def kb(rows: list) -> InlineKeyboardMarkup:
 def cancel_kb(to: str = "client_main"):
     return kb([[btn("❌ Отмена", to)]])
 
+def get_geo_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📍 Отправить геопозицию", request_location=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
 # ═══════════════════════════════════════════
 #   КЛИЕНТ
 # ═══════════════════════════════════════════
@@ -40,8 +47,7 @@ def client_back(to: str = "client_main"):
 
 def client_geo():
     return kb([
-        [btn("📍 Отправить геолокацию", "client_send_geo")],
-        [btn("🏙 Показать все", "client_all_shops")],
+        [btn("🏙 Показать все магазины", "client_all_shops")],
         [btn("🔙 Назад", "client_main")],
     ])
 
@@ -57,15 +63,19 @@ def client_shops(shops: list, page: int = 0):
     builder.row(btn("🔙 Назад", "client_main"))
     return builder.as_markup()
 
-def shop_card(shop_id: int, is_subscribed: bool = False):
+def shop_card(shop_id: int, is_subscribed: bool = False, phone: str = None):
     sub = "💔 Отписаться" if is_subscribed else "❤️ Подписаться"
-    return kb([
+    rows = [
         [btn("💐 Товары", f"shop_products_{shop_id}")],
         [btn("🔥 Хиты", f"shop_hits_{shop_id}"), btn("⭐ Отзывы", f"shop_reviews_{shop_id}")],
-        [btn("📞 Позвонить", f"shop_call_{shop_id}")],
-        [btn(sub, f"shop_subscribe_{shop_id}")],
-        [btn("🔙 К магазинам", "client_catalog")],
-    ])
+    ]
+    if phone:
+        rows.append([btn_url("📞 Позвонить", f"tel:{phone}")])
+    else:
+        rows.append([btn("📞 Позвонить", f"shop_call_{shop_id}")])
+    rows.append([btn(sub, f"shop_subscribe_{shop_id}")])
+    rows.append([btn("🔙 К магазинам", "client_catalog")])
+    return kb(rows)
 
 def shop_categories(shop_id: int, categories: list):
     rows = []
@@ -75,14 +85,19 @@ def shop_categories(shop_id: int, categories: list):
     rows.append([btn("🔙 Назад", f"shop_{shop_id}")])
     return kb(rows)
 
-def products_list(shop_id: int, category: str, products: list, page: int = 0):
+def products_list(shop_id: int, category: str, products: list, page: int = 0, total: int = 0):
     builder = InlineKeyboardBuilder()
     for i, p in enumerate(products, start=1):
         builder.row(btn(f"{i}. {p['title']} — {p['price']}", f"product_{p['id']}"))
+    
     nav = []
-    if page > 0: nav.append(btn("⬅️ Пред", f"prods_{shop_id}_{category}_{page - 1}"))
-    if len(products) == 5: nav.append(btn("След ➡️", f"prods_{shop_id}_{category}_{page + 1}"))
-    if nav: builder.row(*nav)
+    if page > 0:
+        nav.append(btn("⬅️ Пред", f"prods_{shop_id}_{category}_{page - 1}"))
+    if (page + 1) * 5 < total:
+        nav.append(btn("След ➡️", f"prods_{shop_id}_{category}_{page + 1}"))
+    
+    if nav:
+        builder.row(*nav)
     builder.row(btn("🔙 Назад", f"shop_products_{shop_id}"))
     return builder.as_markup()
 
