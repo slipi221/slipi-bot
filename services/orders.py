@@ -85,7 +85,7 @@ async def calc_promo_discount(session: AsyncSession, promo: Promo, items_total: 
     return promo.discount_value.quantize(Decimal("0.01"))
 
 # ═══════════════════════════════════════════
-#   СОЗДАНИЕ ЗАКАЗА
+#   СОЗДАНИЕ ЗАКАЗА (С РАСЧЁТОМ РАССТОЯНИЯ)
 # ═══════════════════════════════════════════
 async def create_order_from_cart(
     session: AsyncSession,
@@ -98,29 +98,39 @@ async def create_order_from_cart(
     comment: str = None,
     promo_code: str = None,
     need_photo: bool = True,
-    distance_km: float = 0,
+    distance_km: float = 0,  # больше не используется, считаем сами
 ) -> Order | None:
+    
+    # ВАЛИДАЦИЯ: Пустой адрес
     if not address or not address.strip():
         return None
         
+    # ВАЛИДАЦИЯ: Дата доставки (московское время)
     today = helpers.today_moscow()
     if delivery_date < today:
         return None
     if (delivery_date - today).days > config.PREORDER_DAYS_AHEAD:
         return None
         
+    # БАГ #4 ИСПРАВЛЕН: Проверка прошедшего слота
+    if helpers.is_slot_past(delivery_slot):
+        return None
+        
+    # ВАЛИДАЦИЯ: Существование слота
     valid_slots = []
     for period in config.DELIVERY_SLOTS.values():
         valid_slots.extend(period["slots"])
     if delivery_slot not in valid_slots:
         return None
 
+    # Антидубль: если уже есть pending заказ — возвращаем его
     existing = await session.execute(
         select(Order).where(Order.client_id == client_id, Order.status == "pending").order_by(Order.id.desc()).limit(1)
     )
     last = existing.scalar_one_or_none()
     if last: return last
 
+    # Получаем корзину
     result = await session.execute(select(CartItem).where(CartItem.client_id == client_id))
     cart_items = result.scalars().all()
     if not cart_items: return None
@@ -129,11 +139,24 @@ async def create_order_from_cart(
     if len(shop_ids) > 1: return None
     shop_id = shop_ids.pop()
 
+    # Проверяем, что магазин активен
     shop_res = await session.execute(select(Shop).where(Shop.id == shop_id))
     shop = shop_res.scalar_one_or_none()
     if not shop or shop.status != "active" or shop.is_paused:
         return None
 
+    # БАГ #1 ИСПРАВЛЕН: Считаем реальное расстояние по координатам
+    client_res = await session.execute(select(Client).where(Client.id == client_id))
+    client = client_res.scalar_one_or_none()
+    
+    real_distance = 0.0
+    if shop.lat and shop.lon and client and client.lat and client.lon:
+        real_distance = helpers.distance_km(
+            float(shop.lat), float(shop.lon),
+            float(client.lat), float(client.lon)
+        )
+    
+    # Формируем список товаров
     items = []
     for ci in cart_items:
         p_result = await session.execute(select(Product).where(Product.id == ci.product_id))
@@ -143,9 +166,11 @@ async def create_order_from_cart(
 
     if not items: return None
 
-    totals = calculate_cart_total(items, distance_km)
+    # Считаем итог с реальным расстоянием
+    totals = calculate_cart_total(items, real_distance)
     if totals["zone"] is None: return None
 
+    # Промокод
     promo_discount = Decimal("0.00")
     promo_obj = None
     if promo_code:
@@ -156,9 +181,10 @@ async def create_order_from_cart(
     final_total = totals["total"] - promo_discount
     total_discount = totals["discount"] + promo_discount
 
-    platform_income = calculate_platform_income(items, distance_km, total_discount)
+    platform_income = calculate_platform_income(items, real_distance, total_discount)
     is_preorder = delivery_date > today
 
+    # Создаем заказ
     order = Order(
         client_id=client_id, shop_id=shop_id, status="pending", payment_status="pending",
         address=address.strip(), client_name=client_name.strip(), client_phone=client_phone, comment=comment,
@@ -167,10 +193,13 @@ async def create_order_from_cart(
         discount=total_discount, total_price=final_total, platform_income=platform_income,
         courier_fee=Decimal(str(totals["zone"]["courier_gets"])),
         need_delivery_photo=need_photo, promo_code=promo_code,
+        lat=client.lat if client else None,
+        lon=client.lon if client else None,
     )
     session.add(order)
     await session.flush()
 
+    # Добавляем товары в заказ
     for item in items:
         product = item["product"]
         qty = item["quantity"]
@@ -182,11 +211,14 @@ async def create_order_from_cart(
         ))
         product.order_count += qty
 
+    # Очищаем корзину
     for ci in cart_items:
         await session.delete(ci)
 
+    # Создаем платеж
     session.add(Payment(order_id=order.id, client_id=client_id, amount=final_total, status="pending"))
 
+    # Используем промокод
     if promo_obj:
         promo_obj.used_count += 1
         session.add(PromoUse(promo_id=promo_obj.id, client_id=client_id, order_id=order.id))
@@ -285,12 +317,15 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
     return order
 
 # ═══════════════════════════════════════════
-#   ВЗЯТИЕ ЗАКАЗА
+#   ВЗЯТИЕ ЗАКАЗА (С ПРОВЕРКОЙ НА БЛОКИРОВКУ)
 # ═══════════════════════════════════════════
 async def take_order(session: AsyncSession, order_id: int, courier_id: int) -> bool:
     c_result = await session.execute(select(Courier).where(Courier.id == courier_id))
     courier = c_result.scalar_one_or_none()
-    if not courier or courier.courier_state not in ("on", "busy"): return False
+    
+    # БАГ #6 ИСПРАВЛЕН: проверяем, что курьер не заблокирован
+    if not courier or courier.is_blocked or courier.courier_state not in ("on", "busy"): 
+        return False
 
     result = await session.execute(
         update(Order).where(Order.id == order_id, Order.status == "wait", Order.courier_id.is_(None))
@@ -367,7 +402,7 @@ async def update_order_status(session: AsyncSession, order_id: int, new_status: 
     await update_client_order_message(session, order_id)
 
 # ═══════════════════════════════════════════
-#   ЗАВЕРШЕНИЕ ЗАКАЗА (С БОНУСАМИ И АЧИВКАМИ)
+#   ЗАВЕРШЕНИЕ ЗАКАЗА (С УВЕДОМЛЕНИЕМ МАГАЗИНУ)
 # ═══════════════════════════════════════════
 async def complete_order(session: AsyncSession, order_id: int):
     result = await session.execute(select(Order).where(Order.id == order_id))
@@ -407,24 +442,31 @@ async def complete_order(session: AsyncSession, order_id: int):
         session.add(Transaction(user_type="courier", user_id=order.courier_id, amount=courier_fee, type="order_payment", order_id=order_id))
     session.add(Transaction(user_type="platform", user_id=0, amount=order.platform_income, type="order_income", order_id=order_id))
 
-    # ── НАЧИСЛЕНИЕ БОНУСОВ И АЧИВОК КУРЬЕРУ ──
+    # Начисляем бонусы и ачивки курьеру
     new_achievements = []
     if order.courier_id:
-        # Берем курьера для бонусов
         c_res = await session.execute(select(Courier).where(Courier.id == order.courier_id))
         courier = c_res.scalar_one_or_none()
         
         if courier:
-            # 1. Реферальный процент
             await bonuses_service.apply_referral_percent(session, courier.id, courier_fee)
-            # 2. Уровень
             await bonuses_service.update_courier_level(session, courier.id)
-            # 3. Ачивки (возвращает список новых)
             new_achievements = await bonuses_service.check_achievements(session, courier.id)
-            # 4. Сбрасываем статус "на заказе"
             courier.courier_state = "on"
 
     await session.commit()
+
+    # БАГ #5 ИСПРАВЛЕН: отправляем уведомление магазину о доставке
+    s_result = await session.execute(select(Shop).where(Shop.id == order.shop_id))
+    shop = s_result.scalar_one_or_none()
+    if shop and shop.tg_id:
+        try:
+            await bot_shop.send_message(
+                shop.tg_id,
+                f"✅ <b>Заказ #{order.id} доставлен!</b>\n\n"
+                f"Курьер выполнил доставку. Спасибо за работу! 🌸"
+            )
+        except Exception: pass
 
     # Отправляем уведомления о новых достижениях
     if order.courier_id and new_achievements:
