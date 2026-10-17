@@ -72,7 +72,7 @@ async def auto_cancel_job():
         async with async_session() as session:
             result = await session.execute(
                 select(Order).where(
-                    Order.status == "new", # Магазин не ответил
+                    Order.status == "new",
                     Order.payment_status == "confirmed",
                 )
             )
@@ -205,16 +205,11 @@ async def delivery_reminder_job():
 
 
 # ═══════════════════════════════════════════
-#   7. НОВОЕ: ГОРЯЩИЕ ЗАКАЗЫ (каждые 5 мин)
+#   7. ГОРЯЩИЕ ЗАКАЗЫ (каждые 5 мин)
 # ═══════════════════════════════════════════
 async def urgent_orders_job():
-    """
-    Находит заказы, у которых до конца слота осталось 30 минут.
-    Добавляет +50₽ буста, шлёт пуш ВСЕМ курьерам (1 раз).
-    """
     try:
         async with async_session() as session:
-            # Ищем заказы "wait" (без курьера), которым ещё не слали пуш
             result = await session.execute(
                 select(Order).where(
                     Order.status == "wait",
@@ -225,8 +220,7 @@ async def urgent_orders_job():
             )
             orders = result.scalars().all()
 
-            if not orders:
-                return
+            if not orders: return
 
             now = datetime.now()
             for o in orders:
@@ -238,12 +232,10 @@ async def urgent_orders_job():
                     minutes_left = (slot_end - now).total_seconds() / 60
 
                     if minutes_left <= 30:
-                        # 1. Накидываем буст
                         o.boost_amount = Decimal(str(o.boost_amount or 0)) + Decimal(str(config.URGENT_BONUS))
                         o.is_urgent_notified = True
                         await session.commit()
 
-                        # 2. Ищем всех активных курьеров
                         c_result = await session.execute(
                             select(Courier).where(
                                 Courier.status == "active",
@@ -253,7 +245,6 @@ async def urgent_orders_job():
                         )
                         couriers = c_result.scalars().all()
 
-                        # 3. Рассылка
                         text = (
                             f"🚨 <b>СРОЧНЫЙ ЗАКАЗ #{o.id}!</b>\n\n"
                             f"⏰ Осталось <b>{int(minutes_left)} мин</b> до конца слота!\n"
@@ -283,19 +274,14 @@ async def urgent_orders_job():
 
 
 # ═══════════════════════════════════════════
-#   8. НОВОЕ: УМНЫЙ ДАЙДЖЕСТ НОВИНОК (18:00)
+#   8. УМНЫЙ ДАЙДЖЕСТ НОВИНОК (18:00)
 # ═══════════════════════════════════════════
 async def daily_digest_job():
-    """
-    Раз в день ищет новые товары за последние 24 часа.
-    Отправляет подписчикам магазина фото первого товара + кнопку.
-    """
     log.info("📬 Дайджест новинок")
     try:
         async with async_session() as session:
             since = datetime.now() - timedelta(hours=24)
             
-            # Ищем магазины, у которых были новые товары за сутки
             result = await session.execute(
                 select(Product.shop_id).where(
                     Product.created_at >= since,
@@ -306,7 +292,6 @@ async def daily_digest_job():
             shop_ids = [row[0] for row in result.all()]
 
             for shop_id in shop_ids:
-                # Все новые товары этого магазина
                 p_result = await session.execute(
                     select(Product).where(
                         Product.shop_id == shop_id,
@@ -318,12 +303,10 @@ async def daily_digest_job():
                 products = p_result.scalars().all()
                 if not products: continue
 
-                # Информация о магазине
                 s_result = await session.execute(select(Shop).where(Shop.id == shop_id))
                 shop = s_result.scalar_one_or_none()
                 if not shop: continue
 
-                # Подписчики
                 sub_result = await session.execute(
                     select(Client).join(ShopSubscription, ShopSubscription.client_id == Client.id)
                     .where(ShopSubscription.shop_id == shop_id, Client.tg_id.isnot(None), Client.is_blocked == False)
@@ -331,7 +314,6 @@ async def daily_digest_job():
                 subscribers = sub_result.scalars().all()
                 if not subscribers: continue
 
-                # Формируем сообщение
                 first_product = products[0]
                 count = len(products)
                 
@@ -347,10 +329,7 @@ async def daily_digest_job():
                 for sub in subscribers:
                     try:
                         if first_product.photo_id:
-                            await bot_client.send_photo(
-                                chat_id=sub.tg_id, photo=first_product.photo_id,
-                                caption=caption, reply_markup=markup
-                            )
+                            await bot_client.send_photo(chat_id=sub.tg_id, photo=first_product.photo_id, caption=caption, reply_markup=markup)
                         else:
                             await bot_client.send_message(sub.tg_id, caption, reply_markup=markup)
                     except Exception: pass
@@ -366,17 +345,14 @@ async def daily_digest_job():
 def setup_scheduler():
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
-    # Старые задачи
-    scheduler.add_job(daily_bonus_job, "cron", hour=23, minute=59)              # Бонусы курьерам
-    scheduler.add_job(auto_cancel_job, "interval", minutes=5)                   # Автоотмена (магазин не ответил)
-    scheduler.add_job(events_reminder_job, "cron", hour=10, minute=0)           # События клиента
-    scheduler.add_job(photo_reminder_job, "interval", minutes=15)               # Напоминание о фото
-    scheduler.add_job(delivery_autocancel_job, "interval", minutes=10)          # Автоотмена доставок
-    scheduler.add_job(delivery_reminder_job, "interval", minutes=30)            # Напоминание о доставках
-
-    # НОВЫЕ задачи
-    scheduler.add_job(urgent_orders_job, "interval", minutes=5)                 # 🔥 Горящие заказы + Буст
-    scheduler.add_job(daily_digest_job, "cron", hour=18, minute=0)              # 📬 Дайджест новинок
+    scheduler.add_job(daily_bonus_job, "cron", hour=23, minute=59)
+    scheduler.add_job(auto_cancel_job, "interval", minutes=5)
+    scheduler.add_job(events_reminder_job, "cron", hour=10, minute=0)
+    scheduler.add_job(photo_reminder_job, "interval", minutes=15)
+    scheduler.add_job(delivery_autocancel_job, "interval", minutes=10)
+    scheduler.add_job(delivery_reminder_job, "interval", minutes=30)
+    scheduler.add_job(urgent_orders_job, "interval", minutes=5)
+    scheduler.add_job(daily_digest_job, "cron", hour=18, minute=0)
 
     scheduler.start()
     log.info("⏰ Планировщик запущен (8 задач)")
@@ -397,6 +373,7 @@ async def run_bot(bot, dp, name: str):
 async def main():
     log.info("🚀 SLIPI — запуск")
 
+    # ИНИЦИАЛИЗАЦИЯ БАЗЫ (критично!)
     try:
         await init_db()
         log.info("✅ База данных готова")
