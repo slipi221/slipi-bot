@@ -1,15 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — единая система уведомлений (Outbox)
+Flowers Express — единая система уведомлений (Outbox)
 """
 import json
 from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from aiogram.types import InlineKeyboardMarkup
+from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 
 from models import Outbox, Shop, Client, Courier
+from utils import helpers
 from bots import bot_client, bot_shop, bot_courier, bot_admin
+import config
 
 async def _get_tg_id(session: AsyncSession, r_type: str, r_id: int) -> int | None:
     """Достает tg_id получателя по типу и ID."""
@@ -19,6 +22,9 @@ async def _get_tg_id(session: AsyncSession, r_type: str, r_id: int) -> int | Non
         res = await session.execute(select(Shop.tg_id).where(Shop.id == r_id))
     elif r_type == "courier":
         res = await session.execute(select(Courier.tg_id).where(Courier.id == r_id))
+    elif r_type == "admin":
+        # Для админа используем ID из конфига
+        return config.ADMIN_ID
     else:
         return None
     return res.scalar_one_or_none()
@@ -35,20 +41,21 @@ async def send_notification(
     recipient_id: int,
     text: str,
     reply_markup: dict = None,
+    photo_id: str = None,
     force_outbox: bool = False
 ):
     """
-    Отправляет уведомление. Если force_outbox=True (или магазин спит), сохраняет в БД.
+    Отправляет уведомление. 
+    Если force_outbox=True (или магазин спит), сохраняет в БД.
     """
-    kb_json = json.dumps(reply_markup) if reply_markup else None
+    # Сериализуем клавиатуру
+    kb_json = reply_markup if isinstance(reply_markup, str) else (json.dumps(reply_markup) if reply_markup else None)
     
-    # 1. Сохраняем в Outbox, если принудительно или если это магазин не на смене
+    # 1. Сохраняем в Outbox, если принудительно
     if force_outbox:
         outbox = Outbox(
-            recipient_type=recipient_type,
-            recipient_id=recipient_id,
-            message_text=text,
-            reply_markup=kb_json,
+            recipient_type=recipient_type, recipient_id=recipient_id,
+            message_text=text, reply_markup=kb_json, photo_id=photo_id,
             status="pending"
         )
         session.add(outbox)
@@ -58,11 +65,11 @@ async def send_notification(
     # 2. Пытаемся отправить сразу
     tg_id = await _get_tg_id(session, recipient_type, recipient_id)
     
-    # Если нет tg_id, сохраняем в Outbox (на случай если привяжет позже)
+    # Если нет tg_id, сохраняем в Outbox
     if not tg_id:
         outbox = Outbox(
             recipient_type=recipient_type, recipient_id=recipient_id,
-            message_text=text, reply_markup=kb_json, status="pending"
+            message_text=text, reply_markup=kb_json, photo_id=photo_id, status="pending"
         )
         session.add(outbox)
         await session.commit()
@@ -73,14 +80,53 @@ async def send_notification(
         # Конвертируем JSON обратно в InlineKeyboardMarkup
         kb = None
         if reply_markup:
-            kb = InlineKeyboardMarkup(**reply_markup)
+            if isinstance(reply_markup, dict):
+                kb = InlineKeyboardMarkup(**reply_markup)
+            elif isinstance(reply_markup, str):
+                kb = InlineKeyboardMarkup(**json.loads(reply_markup))
+        
+        if photo_id:
+            await bot.send_photo(chat_id=tg_id, photo=photo_id, caption=text, reply_markup=kb)
+        else:
+            await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb)
             
-        await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb)
-    except Exception:
-        # Если не смогли доставить (заблокировали бота), кладем в Outbox
+    except TelegramForbiddenError:
+        # Пользователь заблокировал бота — помечаем в БД
+        if recipient_type == "client":
+            await session.execute(
+                Client.__table__.update().where(Client.id == recipient_id).values(is_blocked=True)
+            )
+        elif recipient_type == "courier":
+            await session.execute(
+                Courier.__table__.update().where(Courier.id == recipient_id).values(is_blocked=True)
+            )
+        elif recipient_type == "shop":
+            # Магазины не блокируются, но можно записать в лог
+            pass
+        await session.commit()
+        print(f"🚫 Пользователь {recipient_type} #{recipient_id} заблокировал бота")
+        
+    except TelegramBadRequest as e:
+        print(f"❌ Ошибка Telegram: {e}")
+        # Если ошибка связана с фото, пробуем отправить без него
+        if photo_id and "wrong file" in str(e).lower():
+            try:
+                await bot.send_message(chat_id=tg_id, text=text, reply_markup=kb)
+            except Exception: pass
+        else:
+            # Кладем в Outbox, чтобы не потерять
+            outbox = Outbox(
+                recipient_type=recipient_type, recipient_id=recipient_id,
+                message_text=text, reply_markup=kb_json, photo_id=photo_id, status="pending"
+            )
+            session.add(outbox)
+            await session.commit()
+            
+    except Exception as e:
+        print(f"❌ Неизвестная ошибка: {e}")
         outbox = Outbox(
             recipient_type=recipient_type, recipient_id=recipient_id,
-            message_text=text, reply_markup=kb_json, status="pending"
+            message_text=text, reply_markup=kb_json, photo_id=photo_id, status="pending"
         )
         session.add(outbox)
         await session.commit()
@@ -88,7 +134,6 @@ async def send_notification(
 async def flush_outbox_for_shop(session: AsyncSession, shop_id: int):
     """
     Отправляет все накопленные сообщения магазину (когда он выходит на смену).
-    ИСПРАВЛЕНО (Баг #3).
     """
     res = await session.execute(
         select(Outbox).where(
@@ -111,10 +156,15 @@ async def flush_outbox_for_shop(session: AsyncSession, shop_id: int):
             markup = json.loads(msg.reply_markup) if msg.reply_markup else None
             kb = InlineKeyboardMarkup(**markup) if markup else None
             
-            await bot_shop.send_message(chat_id=tg_id, text=msg.message_text, reply_markup=kb)
+            if msg.photo_id:
+                await bot_shop.send_photo(chat_id=tg_id, photo=msg.photo_id, caption=msg.message_text, reply_markup=kb)
+            else:
+                await bot_shop.send_message(chat_id=tg_id, text=msg.message_text, reply_markup=kb)
+                
             msg.status = "sent"
-            msg.sent_at = datetime.now()
+            msg.sent_at = helpers.now_moscow()
         except Exception as e:
             print(f"Ошибка отправки из Outbox магазину {shop_id}: {e}")
+            msg.status = "failed" # Помечаем как failed, чтобы не висело вечно
     
     await session.commit()
