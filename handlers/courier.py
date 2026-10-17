@@ -6,8 +6,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, 
+    InlineKeyboardButton, BufferedInputFile
+)
 from aiogram.fsm.context import FSMContext
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select, update
 
 import config
@@ -47,7 +51,7 @@ async def show_courier_menu(message: Message, courier: Courier, edit: bool = Fal
         await message.answer(text, reply_markup=markup)
 
 # ═══════════════════════════════════════════
-#   /start И РЕГИСТРАЦИЯ (БЕЗ КАРТЫ)
+#   /start И РЕГИСТРАЦИЯ
 # ═══════════════════════════════════════════
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
@@ -149,8 +153,7 @@ async def reg_referral(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        "✅ <b>Заявка отправлена!</b>\n\n"
-        "Ждите одобрения админа.\n\n"
+        "✅ <b>Заявка отправлена!</b>\n\nЖдите одобрения админа.\n\n"
         "💳 <i>Карту для выплат вы сможете указать позже в разделе «Реквизиты».</i>",
         reply_markup=kb.courier_main_off_shift()
     )
@@ -324,9 +327,7 @@ async def take_order(call: CallbackQuery):
         try: await bot_client.send_message(client.tg_id, f"🚴 <b>Курьер назначен на заказ #{order_id}</b>\n\n👤 {helpers.escape(courier.name)}\n📞 {helpers.escape(courier.phone)}")
         except Exception: pass
     await call.answer()
-    # ═══════════════════════════════════════════
-#   ВЗЯТИЕ СВОЕЙ ДОСТАВКИ
-# ═══════════════════════════════════════════
+
 @router.callback_query(F.data.startswith("courier_take_del_"))
 async def take_delivery(call: CallbackQuery):
     delivery_id = int(call.data.split("_")[-1])
@@ -370,8 +371,7 @@ async def take_delivery(call: CallbackQuery):
         try: await bot_shop.send_message(shop.tg_id, f"🚴 Курьер {helpers.escape(courier.name)} взял доставку #Д-{delivery_id}")
         except Exception: pass
     await call.answer()
-
-# ═══════════════════════════════════════════
+    # ═══════════════════════════════════════════
 #   СТАТУСЫ ЗАКАЗА
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("courier_picked_") & ~F.data.startswith("courier_del_picked_"))
@@ -486,7 +486,7 @@ async def del_done(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   ФОТО ВРУЧЕНИЯ
+#   ФОТО ВРУЧЕНИЯ (ИСПРАВЛЕНО)
 # ═══════════════════════════════════════════
 @router.message(CourierFSM.delivery_photo, F.photo)
 async def receive_delivery_photo(message: Message, state: FSMContext):
@@ -494,6 +494,16 @@ async def receive_delivery_photo(message: Message, state: FSMContext):
     target = data.get("target_type", "order")
     obj_id = data.get("order_id") or data.get("delivery_id")
     photo_id = message.photo[-1].file_id
+
+    # БАГ #2 ИСПРАВЛЕН: Скачиваем фото и отправляем как новый файл
+    try:
+        file = await bot_courier.get_file(photo_id)
+        file_bytes = await bot_courier.download_file(file.file_path)
+        photo_input = BufferedInputFile(file_bytes.read(), filename="delivery.jpg")
+    except Exception as e:
+        print(f"Ошибка скачивания фото: {e}")
+        await message.answer("❌ Ошибка загрузки фото. Попробуйте еще раз.")
+        return
 
     if target == "order":
         async with async_session() as session:
@@ -503,13 +513,13 @@ async def receive_delivery_photo(message: Message, state: FSMContext):
                 order.delivery_photo_id = photo_id
                 await session.commit()
 
-                try: await bot_admin.send_photo(config.ADMIN_ID, photo_id, caption=f"📸 <b>Заказ #{order.id} доставлен</b>")
+                try: await bot_admin.send_photo(config.ADMIN_ID, photo_input, caption=f"📸 <b>Заказ #{order.id} доставлен</b>")
                 except Exception: pass
 
                 s_r = await session.execute(select(Shop).where(Shop.id == order.shop_id))
                 shop = s_r.scalar_one_or_none()
                 if shop and shop.tg_id:
-                    try: await bot_shop.send_photo(shop.tg_id, photo_id, caption=f"📸 <b>Заказ #{order.id} доставлен</b>")
+                    try: await bot_shop.send_photo(shop.tg_id, photo_input, caption=f"📸 <b>Заказ #{order.id} доставлен</b>")
                     except Exception: pass
 
         await state.clear()
@@ -522,13 +532,13 @@ async def receive_delivery_photo(message: Message, state: FSMContext):
                 d.delivery_photo_id = photo_id
                 await session.commit()
 
-                try: await bot_admin.send_photo(config.ADMIN_ID, photo_id, caption=f"📸 <b>Доставка #Д-{d.id} выполнена</b>")
+                try: await bot_admin.send_photo(config.ADMIN_ID, photo_input, caption=f"📸 <b>Доставка #Д-{d.id} выполнена</b>")
                 except Exception: pass
 
                 s_r = await session.execute(select(Shop).where(Shop.id == d.shop_id))
                 shop = s_r.scalar_one_or_none()
                 if shop and shop.tg_id:
-                    try: await bot_shop.send_photo(shop.tg_id, photo_id, caption=f"📸 <b>Доставка #Д-{d.id} выполнена</b>")
+                    try: await bot_shop.send_photo(shop.tg_id, photo_input, caption=f"📸 <b>Доставка #Д-{d.id} выполнена</b>")
                     except Exception: pass
 
         await state.clear()
@@ -768,6 +778,12 @@ async def process_withdraw(message: Message, state: FSMContext):
         data = await state.get_data()
         method = data.get("method", "card")
 
+        # Если у курьера нет карты, отправляем в реквизиты
+        if method == "card" and not courier.card_number:
+            await state.clear()
+            await message.answer("❌ У вас не указана карта. Заполните реквизиты в разделе «💳 Реквизиты».", reply_markup=kb.courier_main_on_shift())
+            return
+
         payout = await payments_service.create_payout(
             session=session, user_type="courier", user_id=courier.id, amount=amount, method=method,
             card_number=courier.card_number, bank_name=courier.bank_name,
@@ -930,7 +946,7 @@ async def cr_sbp_save(message: Message, state: FSMContext):
     await message.answer("✅ СБП сохранён.", reply_markup=kb.courier_main_on_shift())
 
 # ═══════════════════════════════════════════
-#   АКТИВНЫЕ ЗАКАЗЫ (С МАРШРУТОМ ПО ВСЕМ)
+#   АКТИВНЫЕ ЗАКАЗЫ
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "courier_my_orders")
 async def my_orders(call: CallbackQuery):
@@ -1006,5 +1022,3 @@ async def view_active_delivery(call: CallbackQuery):
 
     await call.message.edit_text(text, reply_markup=kb.kb(rows))
     await call.answer()
-    
-    
