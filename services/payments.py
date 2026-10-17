@@ -255,3 +255,21 @@ async def topup_courier_balance(session: AsyncSession, courier_id: int, amount: 
     await session.execute(update(Courier).where(Courier.id == courier_id).values(balance=Courier.balance + amount))
     session.add(Transaction(user_type="courier", user_id=courier_id, amount=amount, type="topup", comment="Пополнение админом"))
     await session.commit()
+    # ═══════════════════════════════════════════
+#   ЭКСПОРТ CSV (магазин)
+# ═══════════════════════════════════════════
+async def export_shop_orders_csv(session: AsyncSession, shop_id: int) -> str:
+    """Возвращает CSV-строку со всеми заказами магазина."""
+    orders = await session.execute(
+        select(Order).where(Order.shop_id == shop_id).order_by(Order.id.desc())
+    )
+    orders = orders.scalars().all()
+
+    lines = ["№;Дата;Клиент;Телефон;Адрес;Сумма;Статус"]
+    for o in orders:
+        lines.append(
+            f"{o.id};{o.created_at.strftime('%d.%m.%Y')};"
+            f"{o.client_name};{o.client_phone};{o.address};"
+            f"{o.total_price};{o.status}"
+        )
+    return "\n".join(lines)
