@@ -87,8 +87,9 @@ async def support(call: CallbackQuery):
 # ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_catalog")
 async def catalog(call: CallbackQuery):
-    # Отправляем нативную кнопку геолокации
-    await call.message.delete()
+    try: await call.message.delete()
+    except TelegramBadRequest: pass
+    
     await call.message.answer(
         "📍 Нажмите на кнопку внизу экрана, чтобы показать ближайшие магазины.\n"
         "Или выберите «Показать все магазины».",
@@ -99,7 +100,6 @@ async def catalog(call: CallbackQuery):
 
 @router.message(F.location)
 async def got_location(message: Message):
-    # Убираем клавиатуру с гео
     await message.answer("Геопозиция получена! 🔍 Ищем магазины...", reply_markup=ReplyKeyboardRemove())
     
     async with async_session() as session:
@@ -159,7 +159,12 @@ async def shop_card(call: CallbackQuery):
         is_subscribed = sub_result.scalar_one_or_none() is not None
 
     text = f"🏪 <b>{helpers.escape(shop.name)}</b>\n⭐ {float(shop.rating or 0):.1f} ({shop.reviews_count})\n📍 {helpers.escape(shop.address or '—')}\n🕒 {shop.work_start} – {shop.work_end}"
-    await call.message.edit_text(text, reply_markup=kb.shop_card(shop_id, is_subscribed, shop.phone))
+    
+    # Пытаемся показать кнопку с телефоном, если ошибка - показываем без нее
+    try:
+        await call.message.edit_text(text, reply_markup=kb.shop_card(shop_id, is_subscribed, shop.phone))
+    except TelegramBadRequest:
+        await call.message.edit_text(text, reply_markup=kb.shop_card(shop_id, is_subscribed, None))
     await call.answer()
 
 @router.callback_query(F.data.startswith("shop_call_"))
@@ -288,7 +293,6 @@ async def prods_page(call: CallbackQuery):
     await call.message.edit_text(f"📦 <b>Товары (стр. {page + 1})</b>", reply_markup=kb.products_list(shop_id, category, items, page, total=len(products)))
     await call.answer()
 
-# ЖЕЛЕЗОБЕТОННАЯ КАРТОЧКА ТОВАРА
 @router.callback_query(F.data.startswith("product_"))
 async def product_card(call: CallbackQuery):
     product_id = int(call.data.split("_")[-1])
@@ -361,7 +365,6 @@ async def cart_add(call: CallbackQuery):
         cart_result = await session.execute(select(CartItem).where(CartItem.client_id == client.id))
         cart_items = cart_result.scalars().all()
 
-        # Проверка на разные магазины
         if cart_items and cart_items[0].shop_id != product.shop_id:
             await call.answer("⚠️ В корзине уже есть товар из другого магазина.", show_alert=True)
             return
@@ -377,7 +380,6 @@ async def cart_add(call: CallbackQuery):
 async def cart_view(call: CallbackQuery):
     async with async_session() as session:
         client = await get_or_create_client(session, call.from_user.id)
-        # Подтягиваем сразу и корзину, и товары, и магазин
         result = await session.execute(
             select(CartItem, Product, Shop)
             .join(Product, Product.id == CartItem.product_id)
@@ -387,10 +389,12 @@ async def cart_view(call: CallbackQuery):
         rows = result.all()
 
     if not rows:
-        await call.message.edit_text("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
+        try: await call.message.edit_text("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
+        except TelegramBadRequest:
+            await call.message.delete()
+            await call.message.answer("🛒 Корзина пуста.", reply_markup=kb.cart_empty())
         return
 
-    # Берем название магазина из первой строки
     shop_name = rows[0][2].name
 
     text = f"🛒 <b>Ваша корзина</b>\n"
@@ -875,7 +879,7 @@ async def track_cancel_yes(call: CallbackQuery):
     await call.answer()
 
 # ═══════════════════════════════════════════
-#   ОТЗЫВЫ И ИЗБРАННОЕ
+#   ОТЗЫВЫ, ИЗБРАННОЕ, БАЛАНС, ПРОМОКОД
 # ═══════════════════════════════════════════
 @router.callback_query(F.data.startswith("rate_start_"))
 async def rate_start(call: CallbackQuery):
@@ -970,9 +974,6 @@ async def favorites(call: CallbackQuery):
     await call.message.edit_text(f"❤️ <b>Избранное ({len(items)})</b>", reply_markup=kb.favorites_list(items))
     await call.answer()
 
-# ═══════════════════════════════════════════
-#   БАЛАНС, ПРОМОКОД, СОБЫТИЯ
-# ═══════════════════════════════════════════
 @router.callback_query(F.data == "client_balance")
 async def balance(call: CallbackQuery):
     async with async_session() as session:
