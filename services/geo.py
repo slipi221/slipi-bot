@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-SLIPI — геолокация
+Flowers Express — геолокация
 """
-from datetime import datetime, timedelta
-
+from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import config
-from models import Shop, Courier, Order, DeliveryOrder
+from models import Shop, Courier, Order
 from utils import helpers
-
 
 # ═══════════════════════════════════════════
 #   БЛИЖАЙШИЕ МАГАЗИНЫ
@@ -53,7 +51,6 @@ async def find_nearby_shops(
     out.sort(key=lambda x: x["distance"])
     return out[:limit]
 
-
 # ═══════════════════════════════════════════
 #   ВСЕ АКТИВНЫЕ МАГАЗИНЫ
 # ═══════════════════════════════════════════
@@ -66,39 +63,23 @@ async def get_all_shops(session: AsyncSession, limit: int = 50) -> list:
     )
     return result.scalars().all()
 
-
 # ═══════════════════════════════════════════
-#   БЛИЖАЙШИЕ КУРЬЕРЫ (для пуша заказов)
+#   ВСЕ КУРЬЕРЫ НА СМЕНЕ (БЕЗ ФИЛЬТРА ПО РАССТОЯНИЮ)
 # ═══════════════════════════════════════════
-async def find_nearby_couriers(
-    session: AsyncSession,
-    shop_lat: float,
-    shop_lon: float,
-    radius_km: float = 5,
-) -> list:
+async def get_couriers_on_shift(session: AsyncSession) -> list:
+    """
+    Возвращает ВСЕХ курьеров на смене.
+    Фильтр по расстоянию убран (пункт 279).
+    """
     result = await session.execute(
         select(Courier).where(
             Courier.status == "active",
             Courier.courier_state == "on",
             Courier.is_blocked == False,
-            Courier.lat.isnot(None),
-            Courier.lon.isnot(None),
+            Courier.tg_id.isnot(None),
         )
     )
-    couriers = result.scalars().all()
-
-    out = []
-    for c in couriers:
-        dist = helpers.distance_km(
-            shop_lat, shop_lon,
-            float(c.lat), float(c.lon),
-        )
-        if dist <= radius_km:
-            out.append({"courier": c, "distance": dist})
-
-    out.sort(key=lambda x: x["distance"])
-    return out
-
+    return result.scalars().all()
 
 # ═══════════════════════════════════════════
 #   ОБНОВЛЕНИЕ ГЕО КУРЬЕРА
@@ -116,7 +97,7 @@ async def update_courier_location(
 
     courier.lat = lat
     courier.lon = lon
-    courier.loc_time = datetime.now()
+    courier.loc_time = helpers.now_moscow()
 
     # Авто-смена: если курьер не был на смене — ставим автоматически
     if courier.courier_state == "off":
@@ -125,7 +106,6 @@ async def update_courier_location(
 
     await session.commit()
     return True
-
 
 # ═══════════════════════════════════════════
 #   РАССТОЯНИЯ ДЛЯ КУРЬЕРА
@@ -161,16 +141,15 @@ async def order_distance_for_courier(
         "total": round(to_shop + to_client, 2),
     }
 
-
 # ═══════════════════════════════════════════
 #   ПРОВЕРКА ГРАФИКА РАБОТЫ МАГАЗИНА
 # ═══════════════════════════════════════════
 def is_shop_open(shop: Shop) -> bool:
     """
     Проверяет, работает ли магазин сейчас.
-    Учитывает schedule (график по дням) или work_start/work_end.
+    Учитывает ночные смены (если смена переходит через полночь).
     """
-    now_dt = datetime.now()
+    now_dt = helpers.now_moscow()
     weekday_keys = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     today_key = weekday_keys[now_dt.weekday()]
 
@@ -187,6 +166,10 @@ def is_shop_open(shop: Shop) -> bool:
             start_min = sh * 60 + sm
             end_min = eh * 60 + em
             now_min = now_dt.hour * 60 + now_dt.minute
+            
+            # Если смена переходит через полночь (например, 22:00-06:00)
+            if start_min > end_min:
+                return now_min >= start_min or now_min <= end_min
             return start_min <= now_min <= end_min
         except Exception:
             return True
@@ -198,39 +181,9 @@ def is_shop_open(shop: Shop) -> bool:
         start_min = sh * 60 + sm
         end_min = eh * 60 + em
         now_min = now_dt.hour * 60 + now_dt.minute
+        
+        if start_min > end_min:
+            return now_min >= start_min or now_min <= end_min
         return start_min <= now_min <= end_min
     except Exception:
         return True
-
-
-# ═══════════════════════════════════════════
-#   ССЫЛКИ НА КАРТЫ
-# ═══════════════════════════════════════════
-def shop_map_link(shop: Shop) -> str:
-    if shop.lat and shop.lon:
-        return helpers.geo_link(float(shop.lat), float(shop.lon))
-    return ""
-
-
-def order_map_link(order: Order) -> str:
-    if order.lat and order.lon:
-        return helpers.geo_link(float(order.lat), float(order.lon))
-    return ""
-
-
-def route_to_shop_link(courier: Courier, shop: Shop) -> str:
-    if courier.lat and courier.lon and shop.lat and shop.lon:
-        return helpers.route_link(
-            float(courier.lat), float(courier.lon),
-            float(shop.lat), float(shop.lon),
-        )
-    return ""
-
-
-def route_to_client_link(shop: Shop, order: Order) -> str:
-    if shop.lat and shop.lon and order.lat and order.lon:
-        return helpers.route_link(
-            float(shop.lat), float(shop.lon),
-            float(order.lat), float(order.lon),
-        )
-    return ""
