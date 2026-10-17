@@ -3,10 +3,18 @@
 SLIPI — вспомогательные функции
 """
 import json
+import html
 from datetime import datetime, date
 from math import radians, sin, cos, sqrt, atan2
 
 import config
+
+# ═══════════════════════════════════════════
+#   БЕЗОПАСНОСТЬ (ЭКРАНИРОВАНИЕ HTML)
+# ═══════════════════════════════════════════
+def escape(text) -> str:
+    """Экранирует HTML-символы (<, >, &), чтобы Telegram не выдавал ошибку."""
+    return html.escape(str(text)) if text else ""
 
 # ═══════════════════════════════════════════
 #   ВРЕМЯ
@@ -88,7 +96,7 @@ def geo_link(lat, lon) -> str:
 
 def route_link(points: list[tuple[float, float]]) -> str:
     """
-    ИСПРАВЛЕНО (Баг #15): Строит мультимаршрут.
+    Строит мультимаршрут.
     Принимает список кортежей [(lat1, lon1), (lat2, lon2), ...]
     """
     if not points or len(points) < 2:
