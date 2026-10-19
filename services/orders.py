@@ -6,7 +6,7 @@ FIX bug6: требование гео клиента (без lat/lon заказ 
 FIX bug7: одиночное фото — send_photo, 2+ — send_media_group.
 FIX bug10: антидубль чистит корзину.
 FIX bug11: промокод берётся и из client.active_promo.
-FIX bug15: клиент не может отменить оплаченный заказ.
+FIX bug15: клиент не может отменить оплаченный заказ; «Отменить» скрыта в track_order.
 FIX bug4: is_slot_past(slot, delivery_date) — новая сигнатура.
 FIX bug1: все datetime — через helpers.now_moscow() (naive MSK).
 NEW: бонусный счёт (client.bonus_balance) — авто-списание, Order.bonus_used.
@@ -146,7 +146,6 @@ async def create_order_from_cart(
     )
     last = existing.scalar_one_or_none()
     if last:
-        # FIX bug10: корзина больше не нужна — чистим
         await session.execute(delete(CartItem).where(CartItem.client_id == client_id))
         await session.commit()
         return last
@@ -247,7 +246,7 @@ async def create_order_from_cart(
         lat=client.lat, lon=client.lon,
     )
     session.add(order)
-    await session.flush()  # получаем order.id
+    await session.flush()
 
     # Списание бонусов
     if bonus_to_use > 0:
@@ -278,7 +277,6 @@ async def create_order_from_cart(
     if final_total > 0:
         session.add(Payment(order_id=order.id, client_id=client_id, amount=final_total, status="pending"))
     else:
-        # Полностью оплачено бонусами — сразу подтверждаем
         order.payment_status = "confirmed"
         order.status = "new"
         order.wait_started_at = helpers.now_moscow()
@@ -288,7 +286,6 @@ async def create_order_from_cart(
     if promo_obj:
         promo_obj.used_count += 1
         session.add(PromoUse(promo_id=promo_obj.id, client_id=client_id, order_id=order.id))
-        # Чистим active_promo у клиента (использован)
         if client.active_promo == effective_promo_code:
             client.active_promo = None
 
@@ -315,8 +312,6 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
         payment.status = "confirmed"
         payment.admin_id = admin_id
         payment.confirmed_at = helpers.now_moscow()
-
-    # FIX: НЕ увеличиваем shop.total_orders здесь — переносим в complete_order
 
     shop_result = await session.execute(select(Shop).where(Shop.id == order.shop_id))
     shop = shop_result.scalar_one_or_none()
@@ -371,7 +366,6 @@ async def confirm_payment(session: AsyncSession, order_id: int, admin_id: int):
         )
 
         if is_shop_awake:
-            # FIX bug7: одиночное фото — send_photo, 2+ — send_media_group
             if media:
                 if len(media) == 1:
                     try:
@@ -496,7 +490,6 @@ async def complete_order(session: AsyncSession, order_id: int):
     courier_fee = Decimal(str(order.courier_fee or 0))
     courier_fee += Decimal(str(order.boost_amount or 0))
 
-    # FIX Feature 7: если чаевые уже есть (edge case) — делим 90/10
     tip_platform = Decimal("0.00")
     if order.tip_amount and order.tip_amount > 0:
         tip = Decimal(str(order.tip_amount))
@@ -542,7 +535,6 @@ async def complete_order(session: AsyncSession, order_id: int):
     if tip_platform > 0:
         session.add(Transaction(user_type="platform", user_id=0, amount=tip_platform, type="tip_income", order_id=order_id))
 
-    # Бонусы, уровни, ачивки
     new_achievements = []
     if order.courier_id:
         c_res = await session.execute(select(Courier).where(Courier.id == order.courier_id))
@@ -608,7 +600,6 @@ async def add_tip_to_order(session: AsyncSession, order_id: int, tip_amount: Dec
     if not client or Decimal(str(client.balance)) < tip:
         return False
 
-    # Списание с баланса
     client.balance -= tip
     order.tip_amount = tip
 
@@ -620,7 +611,6 @@ async def add_tip_to_order(session: AsyncSession, order_id: int, tip_amount: Dec
     platform_tip = (tip * Decimal(str(config.TIP_PLATFORM_PERCENT)) / Decimal("100")).quantize(Decimal("0.01"))
     courier_tip = tip - platform_tip
 
-    # Если заказ уже завершён — курьеру и платформе сразу
     if order.status == "done" and order.courier_id:
         await session.execute(
             update(Courier).where(Courier.id == order.courier_id)
@@ -664,7 +654,6 @@ async def cancel_order(session: AsyncSession, order_id: int, reason: str = None,
         payment.status = "cancelled"
 
     if refund and order.payment_status == "confirmed":
-        # Возврат на основной баланс (бонусы — отдельно)
         await session.execute(
             update(Client).where(Client.id == order.client_id)
             .values(balance=Client.balance + order.total_price)
@@ -673,7 +662,6 @@ async def cancel_order(session: AsyncSession, order_id: int, reason: str = None,
             user_type="client", user_id=order.client_id, account_type="main",
             amount=order.total_price, type="refund", order_id=order_id,
         ))
-        # Возврат использованных бонусов
         if order.bonus_used and order.bonus_used > 0:
             await session.execute(
                 update(Client).where(Client.id == order.client_id)
@@ -687,7 +675,7 @@ async def cancel_order(session: AsyncSession, order_id: int, reason: str = None,
         if payment and payment.status == "confirmed":
             payment.status = "refunded"
 
-    # bug9 (отклонение от паспорта): штраф только за ручное отклонение магазином
+    # bug9: штраф только за ручное отклонение магазином (авто — не штрафуем)
     if cancelled_by == "shop":
         await session.execute(
             update(Shop).where(Shop.id == order.shop_id).values(rejected_count=Shop.rejected_count + 1)
@@ -764,10 +752,12 @@ async def update_client_order_message(session: AsyncSession, order_id: int):
     from bots import bot_client
     from aiogram.exceptions import TelegramBadRequest
 
+    # FIX bug15: передаём payment_status — «Отменить» скрыта, если оплачено
     markup = track_order(
         order.id, order.status, courier.phone if courier else None,
         float(courier.lat) if courier and courier.lat else None,
         float(courier.lon) if courier and courier.lon else None,
+        payment_status=order.payment_status,
     )
 
     try:
@@ -787,7 +777,6 @@ async def edit_order_field(session: AsyncSession, order_id: int, field: str, new
     if not order or order.status in ("picked", "delivering", "at_client", "done", "cancel"):
         return False
 
-    # FIX: валидация слота при изменении
     if field == "delivery_slot" and new_value:
         if helpers.is_slot_past(new_value, order.delivery_date):
             return False
@@ -836,7 +825,6 @@ async def find_alternative_shop(session: AsyncSession, order_id: int) -> int | N
     if not first_product:
         return None
 
-    # FIX: фильтр по активному магазину
     result = await session.execute(
         select(Product).join(Shop, Shop.id == Product.shop_id).where(
             Product.title == first_product.title,
