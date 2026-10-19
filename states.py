@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 Flowers Express — FSM-состояния
+
+FIX: ShopDelivery.distance — добавлено (используется в handlers/shop.py, но отсутствовало).
+NEW Feature 7: ClientFSM.tip_custom — «Своя сумма» чаевых.
 """
 from aiogram.fsm.state import State, StatesGroup
 
 
 # ═══════════════════════════════════════════
-#   КЛИЕНТ — ОФОРМЛЕНИЕ ЗАКАЗА (ПОШАГОВЫЙ АДРЕС)
+#   КЛИЕНТ — ОФОРМЛЕНИЕ ЗАКАЗА
 # ═══════════════════════════════════════════
 class OrderFSM(StatesGroup):
-    # Новый пошаговый ввод адреса
     address_city     = State()
     address_street   = State()
     address_house    = State()
@@ -17,7 +19,6 @@ class OrderFSM(StatesGroup):
     address_flat     = State()
     address_floor    = State()
 
-    # Остальные шаги заказа
     client_name      = State()
     client_phone     = State()
     date             = State()
@@ -48,6 +49,7 @@ class ClientFSM(StatesGroup):
     address_add_title = State()
     edit_order_field  = State()
     complaint_reason  = State()
+    tip_custom        = State()   # NEW Feature 7: своя сумма чаевых
 
 
 # ═══════════════════════════════════════════
@@ -63,12 +65,11 @@ class ShopReg(StatesGroup):
     vk                = State()
     owner_name        = State()
     geo               = State()
-    
-    # График по дням (при регистрации)
+
     schedule_weekdays = State()
     schedule_sat      = State()
     schedule_sun      = State()
-    
+
     categories        = State()
 
 
@@ -96,20 +97,16 @@ class ShopEdit(StatesGroup):
     close_time   = State()
     support_msg  = State()
     chat_message = State()
-    
-    # График работы (в настройках)
+
     schedule_day = State()
-    
-    # Реквизиты
+
     req_card     = State()
     req_bank     = State()
     req_holder   = State()
     req_sbp      = State()
-    
-    # Массовое изменение цен
+
     mass_price   = State()
-    
-    # Редактирование заказа
+
     edit_order_field = State()
 
 
@@ -127,6 +124,7 @@ class ShopDelivery(StatesGroup):
     shop_comment    = State()
     client_comment  = State()
     need_photo      = State()
+    distance        = State()   # FIX: было в handlers/shop.py, но отсутствовало в states.py
     confirm         = State()
     payment         = State()
     edit_field      = State()
@@ -155,8 +153,7 @@ class CourierFSM(StatesGroup):
     delivery_photo   = State()
     chat_message     = State()
     support_msg      = State()
-    
-    # Реквизиты
+
     req_card         = State()
     req_bank         = State()
     req_holder       = State()
@@ -167,50 +164,41 @@ class CourierFSM(StatesGroup):
 #   АДМИН
 # ═══════════════════════════════════════════
 class AdminFSM(StatesGroup):
-    # Настройки
     set_commission    = State()
     set_min_withdraw  = State()
     set_bonus         = State()
     set_hours         = State()
 
-    # Рассылка
+    holiday_markup    = State()   # Feature 9
+
     broadcast_text    = State()
     broadcast_confirm = State()
 
-    # Промокоды
     promo_code        = State()
     promo_type        = State()
     promo_value       = State()
     promo_uses        = State()
 
-    # Возвраты и бусты
     refund_amount     = State()
     boost_custom      = State()
 
-    # Ответ клиенту / магазину / курьеру
     reply_to_client   = State()
 
-    # Блокировка / разблокировка по ID
     block_by_id       = State()
     unblock_by_id     = State()
 
-    # Пополнение баланса
     topup_shop_id     = State()
     topup_amount      = State()
 
-    # Редактирование магазина
     ase_shop_id       = State()
     ase_field         = State()
 
-    # Редактирование курьера
     ace_courier_id    = State()
     ace_field         = State()
 
-    # Мультиадмин
     add_admin_id      = State()
     add_admin_name    = State()
     edit_permissions  = State()
 
-    # Обновление бота
     update_version    = State()
     update_changes    = State()
