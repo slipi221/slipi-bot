@@ -1,7 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-CityExpress — Главный конфиг (полная версия с совместимостью)
-"""
 import os
 from dotenv import load_dotenv
 
@@ -10,13 +7,13 @@ load_dotenv()
 SERVICE_NAME = "CityExpress"
 CITY = "Киров"
 
-# ═══ ТОКЕНЫ (Наши новые + совместимость со старыми handlers) ═══
+# ═══ ТОКЕНЫ TELEGRAM ═══
 TG_CLIENT_TOKEN = os.getenv("CLIENT_TOKEN", "")
 TG_SHOP_TOKEN = os.getenv("SHOP_TOKEN", "")
 TG_COURIER_TOKEN = os.getenv("COURIER_TOKEN", "")
 TG_ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
-# Мостики для старых обработчиков (чтобы не упало)
+# Мостики для старых handlers (чтобы старый ТГ-код не упал)
 CLIENT_TOKEN = TG_CLIENT_TOKEN
 SHOP_TOKEN = TG_SHOP_TOKEN
 COURIER_TOKEN = TG_COURIER_TOKEN
@@ -25,13 +22,10 @@ ADMIN_TOKEN = TG_ADMIN_TOKEN
 # ═══ ТОКЕНЫ VK ═══
 VK_CLIENT_TOKEN = os.getenv("VK_CLIENT_TOKEN", "")
 VK_CLIENT_GROUP_ID = int(os.getenv("VK_CLIENT_GROUP_ID", 0))
-
 VK_SHOP_TOKEN = os.getenv("VK_SHOP_TOKEN", "")
 VK_SHOP_GROUP_ID = int(os.getenv("VK_SHOP_GROUP_ID", 0))
-
 VK_COURIER_TOKEN = os.getenv("VK_COURIER_TOKEN", "")
 VK_COURIER_GROUP_ID = int(os.getenv("VK_COURIER_GROUP_ID", 0))
-
 VK_ADMIN_TOKEN = os.getenv("VK_ADMIN_TOKEN", "")
 VK_ADMIN_GROUP_ID = int(os.getenv("VK_ADMIN_GROUP_ID", 0))
 
@@ -97,7 +91,7 @@ MIN_WITHDRAW_CLIENT = 100
 MIN_WITHDRAW_COURIER = 100
 MIN_WITHDRAW_SHOP = 1000
 
-# ═══ СТАРЫЕ ДАННЫЕ (Мостики для handlers, чтобы старый код не упал) ═══
+# ═══ СТАРЫЕ ДАННЫЕ (Мостики для старых handlers) ═══
 CATEGORIES = {
     "cafe": {"name": "🍕 Еда", "emoji": "🍕"},
     "flowers": {"name": "💐 Цветы", "emoji": "💐"},
@@ -130,13 +124,11 @@ DELIVERY_SLOTS = {
 }
 
 WORKDAYS = {"mon": "Пн", "tue": "Вт", "wed": "Ср", "thu": "Чт", "fri": "Пт", "sat": "Сб", "sun": "Вс"}
-ADMIN_PERMISSIONS = {}
 
 # ═══ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ═══
 def get_markup(price: float, category: str = "flowers") -> float:
     pct = MARKUP_BY_CATEGORY.get(category, 0.15)
-    raw = price * pct
-    return float(int(raw / 10 + 0.5) * 10)
+    return float(int((price * pct) / 10 + 0.5) * 10)
 
 def get_client_price(price: float, category: str = "flowers") -> float:
     return price + get_markup(price, category)
