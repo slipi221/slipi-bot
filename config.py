@@ -1,186 +1,110 @@
 # -*- coding: utf-8 -*-
 """
-Flowers Express (ex-SLIPI) — конфигурация проекта
-
-FIX Feature 8: MARKUP_PERCENT = 0.15 (было MARKUP_STEPS — ступени 50–1000₽).
-FIX: NEARBY_SHOPS_RADIUS_KM = 13 (было 20) — выровнен с MAX_DELIVERY_RADIUS.
-FIX: PREORDER_DAYS_AHEAD = 3 (было 2) — максимум на 3 дня вперёд.
-NEW: CLIENT_BOT_USERNAME — для реферальных ссылок.
-NEW: TIP_PLATFORM_PERCENT — комиссия с чаевых (10% платформе, 90% курьеру).
-NEW: HOLIDAY_MARKUP_PERCENT — праздничная наценка (0 = выкл). Грузится из БД.
-NEW: 4 отдельных канала для логов (Client/Shop/Courier/Admin), fallback на общий.
+CityExpress — Главный конфиг (полная версия с совместимостью)
 """
 import os
-from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ═══════════════════════════════════════════
-#   НАЗВАНИЕ И БРЕНДИНГ
-# ═══════════════════════════════════════════
-SERVICE_NAME = "Цветочный Экспресс"
-SERVICE_TAG = "flowers_express"
+SERVICE_NAME = "CityExpress"
 CITY = "Киров"
 
-# ═══════════════════════════════════════════
-#   ТОКЕНЫ БОТОВ
-# ═══════════════════════════════════════════
-CLIENT_TOKEN  = os.getenv("CLIENT_TOKEN", "")
-SHOP_TOKEN    = os.getenv("SHOP_TOKEN", "")
-COURIER_TOKEN = os.getenv("COURIER_TOKEN", "")
-ADMIN_TOKEN   = os.getenv("ADMIN_TOKEN", "")
+# ═══ ТОКЕНЫ (Наши новые + совместимость со старыми handlers) ═══
+TG_CLIENT_TOKEN = os.getenv("CLIENT_TOKEN", "")
+TG_SHOP_TOKEN = os.getenv("SHOP_TOKEN", "")
+TG_COURIER_TOKEN = os.getenv("COURIER_TOKEN", "")
+TG_ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
 
-# Юзернейм клиентского бота (для реферальных ссылок)
-# ЗАМЕНИ на реальный!
-CLIENT_BOT_USERNAME = os.getenv("CLIENT_BOT_USERNAME", "flowers_express_bot")
+# Мостики для старых обработчиков (чтобы не упало)
+CLIENT_TOKEN = TG_CLIENT_TOKEN
+SHOP_TOKEN = TG_SHOP_TOKEN
+COURIER_TOKEN = TG_COURIER_TOKEN
+ADMIN_TOKEN = TG_ADMIN_TOKEN
 
-# ═══════════════════════════════════════════
-#   АДМИН
-# ═══════════════════════════════════════════
-ADMIN_ID   = int(os.getenv("ADMIN_ID", 0))
-ADMIN_NAME = "Максим"
+# ═══ ТОКЕНЫ VK ═══
+VK_CLIENT_TOKEN = os.getenv("VK_CLIENT_TOKEN", "")
+VK_CLIENT_GROUP_ID = int(os.getenv("VK_CLIENT_GROUP_ID", 0))
 
-# Общий канал (fallback)
+VK_SHOP_TOKEN = os.getenv("VK_SHOP_TOKEN", "")
+VK_SHOP_GROUP_ID = int(os.getenv("VK_SHOP_GROUP_ID", 0))
+
+VK_COURIER_TOKEN = os.getenv("VK_COURIER_TOKEN", "")
+VK_COURIER_GROUP_ID = int(os.getenv("VK_COURIER_GROUP_ID", 0))
+
+VK_ADMIN_TOKEN = os.getenv("VK_ADMIN_TOKEN", "")
+VK_ADMIN_GROUP_ID = int(os.getenv("VK_ADMIN_GROUP_ID", 0))
+
+# ═══ АДМИНЫ ═══
+ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+ADMIN_IDS = [ADMIN_ID]
 ADMIN_CHANNEL_ID = os.getenv("ADMIN_CHANNEL_ID", "")
 
-# 4 отдельных канала для логов (Feature 1).
-# Если пусто — используется ADMIN_CHANNEL_ID (fallback).
-ADMIN_CHANNEL_ID_CLIENT  = os.getenv("ADMIN_CHANNEL_ID_CLIENT", "") or ADMIN_CHANNEL_ID
-ADMIN_CHANNEL_ID_SHOP    = os.getenv("ADMIN_CHANNEL_ID_SHOP", "")   or ADMIN_CHANNEL_ID
-ADMIN_CHANNEL_ID_COURIER = os.getenv("ADMIN_CHANNEL_ID_COURIER", "") or ADMIN_CHANNEL_ID
-ADMIN_CHANNEL_ID_ADMIN   = os.getenv("ADMIN_CHANNEL_ID_ADMIN", "")   or ADMIN_CHANNEL_ID
+# ═══ БАЗА ДАННЫХ ═══
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
-# ═══════════════════════════════════════════
-#   БАЗА ДАННЫХ
-# ═══════════════════════════════════════════
-DATABASE_URL_ENV = os.getenv("DATABASE_URL", "")
+# ═══ НАШИ НОВЫЕ ПРАВИЛА ═══
+MIN_ORDER_AMOUNT = 500
+MIN_PLATFORM_MARGIN = 20
 
-if DATABASE_URL_ENV:
-    DATABASE_URL = DATABASE_URL_ENV
-else:
-    DATA_DIR = os.getenv("DATA_DIR", "data")
-    Path(DATA_DIR).mkdir(parents=True, exist_ok=True)
-    DATABASE_URL = f"sqlite+aiosqlite:///{DATA_DIR}/flowers_express.db"
-
-# ═══════════════════════════════════════════
-#   ОПЛАТА
-# ═══════════════════════════════════════════
-CARD_NUMBER = "2200 1523 3577 2441"
-CARD_HOLDER = "МАКСИМ С."
-BANK_NAME   = "Альфа-Банк"
-SBP_PHONE   = "+7 991 792-92-51"
-
-# ═══════════════════════════════════════════
-#   ЗОНЫ ДОСТАВКИ И НАЦЕНКИ
-# ═══════════════════════════════════════════
-MAX_DELIVERY_RADIUS = 13
-
-# (от_км, до_км, клиент_платит, курьер_получает)
-DELIVERY_ZONES = [
-    (0,  3,   350, 280),
-    (3,  6,   420, 330),
-    (6,  10,  500, 380),
-    (10, 13,  600, 450),
-]
-
-# FIX Feature 8: наценка +15% ко всем товарам (было MARKUP_STEPS — фикс. ступени).
-# Округление до 10₽. Доставку не трогаем.
-MARKUP_PERCENT = 0.15
-
-# FIX Feature 9: праздничная наценка (грузится из БД при старте, 0 = выкл).
-# Пример: 15 → +15% ко всем товарам (помимо обычной наценки).
-HOLIDAY_MARKUP_PERCENT = 0.0
-
-# ═══════════════════════════════════════════
-#   ФИНАНСЫ И БОНУСЫ
-# ═══════════════════════════════════════════
-BULK_DISCOUNT_PERCENT = 3
-BULK_DISCOUNT_MIN_BOUQUETS = 3
-
-# Комиссии при выводе
-CLIENT_WITHDRAW_COMMISSION = 5    # клиент платит 5%
-COURIER_WITHDRAW_COMMISSION = 0   # курьер — 0%
-SHOP_WITHDRAW_COMMISSION = 0      # магазин — 0%
-
-CLIENT_MIN_WITHDRAW = 500
-COURIER_MIN_WITHDRAW = 500
-
-BONUS_PER_10_ORDERS = 50
-URGENT_BONUS = 50
-REFERRAL_PERCENT = 5
-REFERRAL_MONTHS = 3
-
-# Чаевые (Feature 7): платформа берёт 10%, курьеру идёт 90%
-TIP_PLATFORM_PERCENT = 10
-
-BOOST_MAX_PERCENT = 20
-BOOST_TRIGGER_MINUTES = 30
-
-# ═══════════════════════════════════════════
-#   БАНКИ (для выплат)
-# ═══════════════════════════════════════════
-BANKS = [
-    "🔵 Сбербанк",
-    "🔴 Альфа-Банк",
-    "🟡 Тинькофф",
-    "🟢 ВТБ",
-    "🟣 Райффайзен",
-    "⚫ Газпромбанк",
-    "🔵 Россельхозбанк",
-    "🟡 Открытие",
-    "🟠 Совкомбанк",
-    "⚪ Другой",
-]
-
-# ═══════════════════════════════════════════
-#   ГОРОД И РАБОТА
-# ═══════════════════════════════════════════
-WORK_HOURS = "7:00 – 24:00"
-WORK_DAYS = "Пн – Вс"
-WORK_START_HOUR = 7
-WORK_END_HOUR = 24
-
-NIGHT_MODE_START = 23
-NIGHT_MODE_END = 8
-NIGHT_ORDER_DEADLINE_HOUR = 10
-
-# ═══════════════════════════════════════════
-#   АВТООТМЕНА И ПРЕДЗАКАЗ
-# ═══════════════════════════════════════════
-DAY_ORDER_TIMEOUT_MINUTES = 30
-ORDER_REMINDER_INTERVAL_MIN = 10
-PREORDER_DAYS_AHEAD = 3  # FIX: было 2
-
-# ═══════════════════════════════════════════
-#   ГЕО И СЕРВИС
-# ═══════════════════════════════════════════
-COURIER_GEO_UPDATE_MINUTES = 5
-NEARBY_SHOPS_RADIUS_KM = 13  # FIX: было 20 (выровнено с MAX_DELIVERY_RADIUS)
-SERVICE_VK = "vk.com/flowers_express"
-SERVICE_VK_TG = "@flowers_express"
-SUPPORT_TG = "@flowers_express_support"
-SUPPORT_PHONE = "+7 991 792-92-51"
-
-# ═══════════════════════════════════════════
-#   КАТЕГОРИИ
-# ═══════════════════════════════════════════
-CATEGORIES = {
-    "bouquets": {"name": "💐 Букеты",    "emoji": "💐"},
-    "potted":   {"name": "🪴 Горшечные", "emoji": "🪴"},
-    "cactus":   {"name": "🌵 Кактусы",   "emoji": "🌵"},
-    "toys":     {"name": "🧸 Игрушки",   "emoji": "🧸"},
-    "balloons": {"name": "🎈 Шары",      "emoji": "🎈"},
-    "sweets":   {"name": "🍫 Сладкое",   "emoji": "🍫"},
-    "cards":    {"name": "💌 Открытки",  "emoji": "💌"},
-    "candles":  {"name": "🕯 Свечи",     "emoji": "🕯"},
-    "decor":    {"name": "🎀 Декор",     "emoji": "🎀"},
-    "other":    {"name": "🌿 Другое",    "emoji": "🌿"},
+MARKUP_BY_CATEGORY = {
+    "cafe":     0.20,
+    "flowers":  0.15,
+    "pharmacy": 0.15,
+    "gifts":    0.15,
 }
 
-# ═══════════════════════════════════════════
-#   СТАТУСЫ
-# ═══════════════════════════════════════════
+DELIVERY_ZONES = [
+    (0,  2,  250, 269),
+    (2,  5,  280, 300),
+    (5,  10, 330, 350),
+    (10, 15, 380, 400),
+]
+MAX_DELIVERY_RADIUS = 15
+
+PREP_TIME = {
+    "cafe": 25,
+    "pharmacy": 15,
+    "flowers": 10,
+    "gifts": 10,
+}
+DELIVERY_BUFFER_MINUTES = 10
+
+TRAVEL_TIME = {
+    "zone_1": 20,
+    "zone_2": 30,
+    "zone_3": 45,
+    "zone_4": 60,
+}
+
+SLOT_DURATION_HOURS = 1
+
+COURIER_LEVELS = {
+    "newbie":      (0,   0.00),
+    "experienced": (51,  0.02),
+    "pro":         (201, 0.045),
+    "legend":      (501, 0.07),
+}
+MAX_ORDERS_PER_COURIER = 10
+LATE_PENALTY_PER_20_MIN = 50
+
+CLIENT_WITHDRAW_COMMISSION = 5.0
+COURIER_WITHDRAW_COMMISSION = 1.5
+SHOP_WITHDRAW_COMMISSION = 0.0
+
+MIN_WITHDRAW_CLIENT = 100
+MIN_WITHDRAW_COURIER = 100
+MIN_WITHDRAW_SHOP = 1000
+
+# ═══ СТАРЫЕ ДАННЫЕ (Мостики для handlers, чтобы старый код не упал) ═══
+CATEGORIES = {
+    "cafe": {"name": "🍕 Еда", "emoji": "🍕"},
+    "flowers": {"name": "💐 Цветы", "emoji": "💐"},
+    "pharmacy": {"name": "💊 Аптека", "emoji": "💊"},
+    "gifts": {"name": "🎁 Подарки", "emoji": "🎁"},
+}
+
 STATUS_EMOJI = {
     "new": "🆕", "pending": "⏳", "wait": "🔍", "going": "🚗",
     "picked": "📦", "delivering": "🚴", "at_client": "📍",
@@ -199,89 +123,20 @@ COURIER_STATES = {
     "break": "☕ Перерыв", "busy": "🚗 На заказе",
 }
 
-# ═══════════════════════════════════════════
-#   СЛОТЫ ДОСТАВКИ
-# ═══════════════════════════════════════════
 DELIVERY_SLOTS = {
-    "morning": {
-        "name": "🌅 Утро", "hours": "07:00 – 12:00",
-        "slots": ["07:00-08:00", "08:00-09:00", "09:00-10:00", "10:00-11:00", "11:00-12:00"],
-    },
-    "day": {
-        "name": "☀️ День", "hours": "12:00 – 17:00",
-        "slots": ["12:00-13:00", "13:00-14:00", "14:00-15:00", "15:00-16:00", "16:00-17:00"],
-    },
-    "evening": {
-        "name": "🌆 Вечер", "hours": "17:00 – 22:00",
-        "slots": ["17:00-18:00", "18:00-19:00", "19:00-20:00", "20:00-21:00", "21:00-22:00"],
-    },
-    "night": {
-        "name": "🌙 Ночь", "hours": "22:00 – 00:00",
-        "slots": ["22:00-23:00", "23:00-00:00"],
-    },
+    "morning": {"name": "🌅 Утро", "hours": "08:00 – 12:00", "slots": ["08:00-09:00", "09:00-10:00", "10:00-11:00", "11:00-12:00"]},
+    "day": {"name": "☀️ День", "hours": "12:00 – 18:00", "slots": ["12:00-13:00", "13:00-14:00", "14:00-15:00", "15:00-16:00", "16:00-17:00", "17:00-18:00"]},
+    "evening": {"name": "🌆 Вечер", "hours": "18:00 – 22:00", "slots": ["18:00-19:00", "19:00-20:00", "20:00-21:00", "21:00-22:00"]},
 }
 
-WEEKDAYS = {"mon": "Пн", "tue": "Вт", "wed": "Ср", "thu": "Чт", "fri": "Пт", "sat": "Сб", "sun": "Вс"}
+WORKDAYS = {"mon": "Пн", "tue": "Вт", "wed": "Ср", "thu": "Чт", "fri": "Пт", "sat": "Сб", "sun": "Вс"}
+ADMIN_PERMISSIONS = {}
 
-ADMIN_PERMISSIONS = {
-    "requests": "📨 Заявки", "shops": "🏪 Магазины", "couriers": "🚴 Курьеры",
-    "block": "🚫 Блокировка", "finance": "💰 Финансы", "payments": "💳 Переводы",
-    "payouts": "💸 Выплаты", "settings": "⚙️ Настройки", "admins": "🔑 Админы",
-    "broadcast": "📢 Рассылка", "analytics": "📊 Аналитика", "logs": "📜 Логи",
-}
-
-# ═══════════════════════════════════════════
-#   ФУНКЦИИ
-# ═══════════════════════════════════════════
-def get_markup(price: float) -> float:
-    """
-    FIX Feature 8: наценка +15%, округление до 10₽.
-    Пример: 500₽ → 75₽ → 80₽ (округление вверх) → клиент платит 580₽.
-    """
-    try:
-        p = float(price)
-    except (TypeError, ValueError):
-        return 0.0
-    if p <= 0:
-        return 0.0
-    raw = p * MARKUP_PERCENT
-    # Округление до 10₽ (половина вверх)
+# ═══ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ═══
+def get_markup(price: float, category: str = "flowers") -> float:
+    pct = MARKUP_BY_CATEGORY.get(category, 0.15)
+    raw = price * pct
     return float(int(raw / 10 + 0.5) * 10)
 
-
-def get_client_price(shop_price: float) -> float:
-    """
-    FIX Feature 8 + Feature 9: shop_price + наценка 15% (+ праздничная наценка, если задана).
-    Округление до 10₽.
-    """
-    try:
-        p = float(shop_price)
-    except (TypeError, ValueError):
-        return 0.0
-    base = p + get_markup(p)
-    if HOLIDAY_MARKUP_PERCENT > 0:
-        base = base * (1 + HOLIDAY_MARKUP_PERCENT / 100)
-        base = int(base / 10 + 0.5) * 10
-    return float(base)
-
-
-def get_delivery_zone(distance_km: float) -> dict | None:
-    if distance_km > MAX_DELIVERY_RADIUS:
-        return None
-    for min_km, max_km, client_pays, courier_gets in DELIVERY_ZONES:
-        if min_km <= distance_km < max_km:
-            return {
-                "client_pays": client_pays,
-                "courier_gets": courier_gets,
-                "platform_gets": client_pays - courier_gets,
-            }
-    last = DELIVERY_ZONES[-1]
-    return {
-        "client_pays": last[2],
-        "courier_gets": last[3],
-        "platform_gets": last[2] - last[3],
-    }
-
-
-def get_category_name(key: str) -> str:
-    return CATEGORIES.get(key, {}).get("name", "🌿 Другое")
+def get_client_price(price: float, category: str = "flowers") -> float:
+    return price + get_markup(price, category)
