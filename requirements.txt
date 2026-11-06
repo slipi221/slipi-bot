@@ -1,6 +1,11 @@
 aiogram==3.13.1
-aiosqlite==0.20.0
+vkbottle==4.3.2
 SQLAlchemy==2.0.35
+asyncpg==0.29.0
+alembic==1.13.2
+redis==5.0.8
+pydantic-settings==2.5.2
 python-dotenv==1.0.1
 aiohttp==3.10.5
 APScheduler==3.10.4
+Pillow==10.4.0
