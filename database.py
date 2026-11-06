@@ -5,7 +5,6 @@ CityExpress — Подключение к базе данных (PostgreSQL)
 import logging
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-
 import config
 
 log = logging.getLogger("cityexpress")
@@ -13,7 +12,7 @@ log = logging.getLogger("cityexpress")
 class Base(DeclarativeBase):
     pass
 
-# Создаем движок для PostgreSQL
+# Создаем движок для PostgreSQL с пулом подключений
 engine = create_async_engine(
     config.DATABASE_URL,
     echo=False,
@@ -43,12 +42,11 @@ async def init_db():
         log.error(f"❌ Ошибка создания таблиц: {e}")
         raise e
 
+# Заглушки для совместимости со старым ТГ-кодом
 async def load_config_from_db():
-    """Заглушка для совместимости со старым кодом (настройки пока в config.py)."""
     pass
 
 async def save_setting(key: str, value):
-    """Заглушка для совместимости со старым кодом."""
     log.info(f"💾 Setting '{key}' = {value} (сохранение в БД пока отключено)")
     return True
 
